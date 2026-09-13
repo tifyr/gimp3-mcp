@@ -16,6 +16,11 @@ logger = logging.getLogger("GimpMCPServer")
 
 GIMP_HOST = 'localhost'
 GIMP_PORT = 9877
+# Connecting should fail fast when GIMP isn't running, but waiting for a response
+# must outlast slow operations: giving up on a call GIMP is still executing makes
+# the agent retry and queue duplicate work behind it.
+GIMP_CONNECT_TIMEOUT = 10
+GIMP_RESPONSE_TIMEOUT = 120
 
 class GimpConnection:
     def __init__(self, host=GIMP_HOST, port=GIMP_PORT):
@@ -28,8 +33,9 @@ class GimpConnection:
             return
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(10)
+            self.sock.settimeout(GIMP_CONNECT_TIMEOUT)
             self.sock.connect((self.host, self.port))
+            self.sock.settimeout(GIMP_RESPONSE_TIMEOUT)
             logger.info(f"Connected to GIMP at {self.host}:{self.port}")
         except Exception as e:
             self.sock = None

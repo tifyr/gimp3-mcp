@@ -29,6 +29,7 @@ import signal
 LARGE_SCALING_THRESHOLD = 4.0  # Warn if scaling ratio exceeds this value
 MAX_REGION_SIZE = 8192  # Maximum region dimension in pixels
 DEFAULT_TIMEOUT_SECONDS = 30  # Default timeout for operations
+LISTEN_BACKLOG = 16  # Pending connections kept while commands run one at a time
 
 
 def N_(message): return message
@@ -56,6 +57,10 @@ class MCPPlugin(Gimp.PlugIn):
         self.context = {}
         exec("from gi.repository import Gimp", self.context)
         self.auto_disconnect_client = True
+        # libgimp talks to GIMP over a single unlocked pipe. Two threads making
+        # PDB calls at once interleave messages, which kills the plug-in and on
+        # macOS leaves GIMP spinning at 100% CPU. Run one command at a time.
+        self._exec_lock = threading.Lock()
 
     def do_set_i18n(self, procname):
         # Plugin has no translations; tell GIMP so it stops logging
@@ -140,7 +145,7 @@ class MCPPlugin(Gimp.PlugIn):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.settimeout(1.0)
             self.socket.bind((self.host, self.port))
-            self.socket.listen(1)
+            self.socket.listen(LISTEN_BACKLOG)
             print(f"GimpMCP server started on {self.host}:{self.port}")
 
             while self.running:
@@ -187,6 +192,22 @@ class MCPPlugin(Gimp.PlugIn):
 
         return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, GLib.Error())
 
+    @staticmethod
+    def _client_gone(client):
+        """True if the client has closed its end of the connection."""
+        try:
+            client.setblocking(False)
+            return client.recv(1, socket.MSG_PEEK) == b''
+        except (BlockingIOError, InterruptedError):
+            return False  # connected, nothing extra to read
+        except OSError:
+            return True
+        finally:
+            try:
+                client.setblocking(True)
+            except OSError:
+                pass
+
     def _handle_client(self, client):
         """Handle connected client"""
         # print("Client handler started")
@@ -226,7 +247,14 @@ class MCPPlugin(Gimp.PlugIn):
             request = str(buffer)
         
         # print(f"Parsed request: {request}")
-        response = self.execute_command(request)
+        with self._exec_lock:
+            # A client that gave up while waiting for the lock has closed its
+            # socket; running its command now would apply it out of order.
+            if self._client_gone(client):
+                print("Client disconnected before its command ran; skipping")
+                client.close()
+                return
+            response = self.execute_command(request)
         print(f"response type: {type(response)}")
         
         if isinstance(response, dict):
@@ -1417,7 +1445,7 @@ class MCPPlugin(Gimp.PlugIn):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.settimeout(1.0)
             self.socket.bind((self.host, self.port))
-            self.socket.listen(1)
+            self.socket.listen(LISTEN_BACKLOG)
             print(f"MCP server restarted on {self.host}:{self.port}")
             return {
                 "status": "success",
