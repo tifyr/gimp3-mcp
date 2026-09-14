@@ -2735,7 +2735,11 @@ def list_images(ctx: Context) -> dict:
 
 @mcp.tool()
 def set_active_image(ctx: Context, image_index: int) -> dict:
-    """Raise a specific image to the front / make it active in GIMP.
+    """Raise a specific image's window to the front in GIMP.
+
+    Works for images opened with new_canvas or open_image. GIMP 3 gives plug-ins
+    no way to find windows opened from GIMP's own menus, so those return an error;
+    every other tool still works on them by image_index.
 
     Parameters:
     - image_index: Index of the image to activate (from list_images)
@@ -2790,11 +2794,16 @@ def close_image(
 ) -> dict:
     """Close an image, optionally saving as XCF first.
 
-    Parameters:
-    - image_index: Index of the image to close (default 0)
-    - save_first: If True, save as XCF before closing (default False)
+    Closes images opened with new_canvas or open_image, and images that have no
+    window. GIMP 3 gives plug-ins no way to close a window opened from GIMP's own
+    menus, so for those images this returns an error and they must be closed in GIMP.
 
-    Returns status dict.
+    Parameters:
+    - image_index: Index of the image to close (default 0 = most recently opened)
+    - save_first: If True, save as XCF before closing (default False). Without it,
+      unsaved changes are discarded.
+
+    Returns: {closed_image_id, saved_to (XCF path, or null)}
     """
     try:
         conn = get_gimp_connection()

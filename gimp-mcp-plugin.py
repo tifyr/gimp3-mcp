@@ -46,6 +46,7 @@ PAINT_STROKE_KEYS = {
     "spacing", "pressure", "taper_affects", "smooth", "mode", "strength",
 }
 IMAGE_NAME_PARASITE = "gimp-mcp-name"  # GIMP images have no settable name; new_canvas stores it here
+IMAGE_DISPLAY_PARASITE = "gimp-mcp-display"  # ids of windows this plugin opened for an image
 
 
 def N_(message): return message
@@ -1477,7 +1478,7 @@ class MCPPlugin(Gimp.PlugIn):
                 Gimp.context_set_background(bg_color)
                 Gimp.Drawable.edit_fill(layer, Gimp.FillType.BACKGROUND)
 
-            Gimp.Display.new(image)
+            self._remember_display(image, Gimp.Display.new(image))
             Gimp.displays_flush()
 
             print(f"New canvas created: {width}x{height} {color_mode} fill={fill}")
@@ -1662,6 +1663,7 @@ class MCPPlugin(Gimp.PlugIn):
             if image is None:
                 return {"status": "error", "error": f"Could not open file: {file_path}"}
             display = Gimp.Display.new(image)
+            self._remember_display(image, display)
             Gimp.displays_flush()
             base_type = image.get_base_type()
             mode_map = {
@@ -4155,20 +4157,49 @@ class MCPPlugin(Gimp.PlugIn):
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
+    def _remember_display(self, image, display):
+        """Record a window this plugin opened for image, so close_image can find it.
+
+        GIMP 3 gives plug-ins no way to list an image's windows, so the ids are
+        kept on the image itself in a parasite that is not saved into XCF files
+        but outlives a plugin restart.
+        """
+        ids = [d.get_id() for d in self._recorded_displays(image)] + [display.get_id()]
+        data = ",".join(str(i) for i in ids).encode("ascii")
+        image.attach_parasite(Gimp.Parasite.new(IMAGE_DISPLAY_PARASITE, 0, data))
+
+    @staticmethod
+    def _recorded_displays(image):
+        """Windows this plugin opened for image that are still open."""
+        parasite = image.get_parasite(IMAGE_DISPLAY_PARASITE)
+        if parasite is None:
+            return []
+        ids = bytes(parasite.get_data()).decode("ascii", "ignore").split(",")
+        return [Gimp.Display.get_by_id(int(i)) for i in ids if i.isdigit() and Gimp.Display.id_is_valid(int(i))]
+
+    @staticmethod
+    def _delete_image_quietly(image):
+        """Delete image if it has no windows; return False (without a GIMP error dialog) if it has one."""
+        plug_in = Gimp.get_plug_in()
+        handler = plug_in.get_pdb_error_handler()
+        plug_in.set_pdb_error_handler(Gimp.PDBErrorHandler.PLUGIN)
+        try:
+            return bool(image.delete())
+        finally:
+            plug_in.set_pdb_error_handler(handler)
+
     def _set_active_image(self, params):
-        """Raise a specific image to the front."""
+        """Raise a specific image's window to the front."""
         try:
             image_index = int(params.get("image_index", 0))
             image = self._get_image(image_index)
-            displays = Gimp.get_displays()
-            for display in displays:
-                try:
-                    if display.get_image().get_id() == image.get_id():
-                        Gimp.set_default_context()
-                        display.present()
-                        break
-                except Exception:
-                    pass
+            displays = self._recorded_displays(image)
+            if not displays:
+                raise RuntimeError(
+                    "This image has no window opened by the MCP server (for example it was opened from "
+                    "GIMP's menus), and GIMP 3 gives plug-ins no way to find other windows. "
+                    "Tools still work on it by image_index.")
+            displays[-1].present()
             Gimp.displays_flush()
             return {"status": "success", "results": {"status": "success", "image_id": image.get_id()}}
         except Exception as e:
@@ -4212,36 +4243,41 @@ class MCPPlugin(Gimp.PlugIn):
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
     def _close_image(self, params):
-        """Close an image, optionally saving first."""
+        """Close an image, optionally saving it as XCF first."""
         try:
             from gi.repository import Gio
             image_index = int(params.get("image_index", 0))
             save_first  = bool(params.get("save_first", False))
-            image = self._get_image(image_index)
+            image    = self._get_image(image_index)
+            image_id = image.get_id()
+            saved_to = None
             if save_first:
                 img_file = image.get_file()
                 if img_file:
-                    xcf_path = img_file.get_path().rsplit(".", 1)[0] + ".xcf"
+                    saved_to = img_file.get_path().rsplit(".", 1)[0] + ".xcf"
                 else:
-                    import tempfile
-                    xcf_path = os.path.join(tempfile.gettempdir(), f"gimp_backup_{image.get_id()}.xcf")
-                gio_file = Gio.File.new_for_path(xcf_path)
-                pdb = Gimp.get_pdb()
+                    saved_to = os.path.join(tempfile.gettempdir(), f"gimp_backup_{image_id}.xcf")
+                pdb  = Gimp.get_pdb()
                 proc = pdb.lookup_procedure("gimp-xcf-save")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("image", image)
-                    cfg.set_property("file", gio_file)
-                    proc.run(cfg)
-            # Delete all displays for this image
-            for display in Gimp.get_displays():
-                try:
-                    if display.get_image().get_id() == image.get_id():
-                        Gimp.Display.delete(display)
-                except Exception:
-                    pass
-            image.delete()
-            return {"status": "success", "results": {"status": "success"}}
+                cfg  = proc.create_config()
+                cfg.set_property("image", image)
+                cfg.set_property("file", Gio.File.new_for_path(saved_to))
+                if proc.run(cfg).index(0) != Gimp.PDBStatusType.SUCCESS:
+                    raise RuntimeError(f"Saving {saved_to} failed: {pdb.get_last_error()}; the image was left open")
+            displays = self._recorded_displays(image)
+            if displays:
+                # Closing a window of a dirty image could open a "save changes?" dialog;
+                # save_first is how callers keep their changes.
+                image.clean_all()
+                for display in displays:
+                    display.delete()
+            if image.is_valid() and not self._delete_image_quietly(image):
+                saved_note = f" It was saved to {saved_to}." if saved_to else ""
+                raise RuntimeError(
+                    "This image has a window the MCP server did not open (for example one opened from "
+                    "GIMP's menus), and GIMP 3 gives plug-ins no way to close other windows. "
+                    "Close it in GIMP." + saved_note)
+            return {"status": "success", "results": {"status": "success", "closed_image_id": image_id, "saved_to": saved_to}}
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
