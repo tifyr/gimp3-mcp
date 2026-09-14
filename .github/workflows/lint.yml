@@ -11,3 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/ruff-action@v4.0.0
+        with:
+          # Keep in sync with the ruff-pre-commit rev in .pre-commit-config.yaml.
+          # Unpinned, the action installs the latest ruff, and 0.16 expanded the
+          # default rule set, failing CI on unchanged code.
+          version: "0.15.11"
