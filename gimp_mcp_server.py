@@ -2012,6 +2012,19 @@ def gradient_fill(
         raise Exception(f"gradient_fill failed: {e}")
 
 
+def _painting_error(result):
+    """Error text from a failed GIMP reply, pointing at new_canvas when no image is open.
+
+    Without the hint, agents that only see the painting tools conclude there is
+    no way to create an image.
+    """
+    error = result.get("error", "Unknown error")
+    if "No images are currently open" in error:
+        error += (". Create a canvas with new_canvas(width, height) or open a file with "
+                  "open_image(file_path), then paint on it.")
+    return error
+
+
 # No return annotation: the result is a dict, or [dict, Image] with preview=True,
 # and an annotation would make FastMCP validate it as structured output.
 @mcp.tool()
@@ -2024,6 +2037,9 @@ def paint_stroke(
     preview_max_size: int = 768,
 ):
     """Paint a batch of brush strokes, working in rounds like a painter.
+
+    Paints on an open image. To start a new painting, first call
+    new_canvas(width, height) (white by default), or open a file with open_image.
 
     Paint a few strokes (typically 3-30), look at the result (preview=True or
     get_state_snapshot), then paint the next batch. All strokes in one call
@@ -2073,7 +2089,7 @@ def paint_stroke(
             "strokes": strokes, "layer_name": layer_name, "image_index": image_index,
         })
         if result["status"] != "success":
-            raise Exception(result.get("error", "Unknown error"))
+            raise Exception(_painting_error(result))
         summary = result["results"]
         if not preview:
             return summary
@@ -2142,7 +2158,7 @@ def sample_color(
         })
         if result["status"] == "success":
             return result["results"]
-        raise Exception(result.get("error", "Unknown error"))
+        raise Exception(_painting_error(result))
     except Exception as e:
         traceback.print_exc()
         raise Exception(f"sample_color failed: {e}")

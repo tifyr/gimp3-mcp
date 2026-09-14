@@ -107,11 +107,12 @@ Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
 For painterly work (brush textures, tapered strokes, blending), use the `paint_stroke` tool instead of `call_api`. It paints a batch of strokes in one call and one undo step.
 
 **Work like a painter, in rounds:**
-1. **Block in** big shapes with large soft or textured brushes (`Oils 01`, `Acrylic 01`, size 80–200).
-2. **Look** with `get_state_snapshot()`, or pass `preview=True` to `paint_stroke`.
-3. **Build forms** with medium brushes on a separate layer (`create_layer`), 5–20 strokes per round.
-4. **Zoom in** with `get_state_snapshot(region=bbox)`, using the `bbox` that `paint_stroke` returns. Pick up colors with `sample_color`, then add small detail strokes.
-5. **Blend** edges with `"tool": "smudge"`, clean up with `"tool": "eraser"`, and add highlights last.
+1. **Start** with a canvas: `new_canvas(800, 800)` creates a white one, or `open_image(file_path)` opens a file. `paint_stroke` needs an open image.
+2. **Block in** big shapes with large soft or textured brushes (`Oils 01`, `Acrylic 01`, size 80–200).
+3. **Look** with `get_state_snapshot()`, or pass `preview=True` to `paint_stroke`.
+4. **Build forms** with medium brushes on a separate layer (`create_layer`), 5–20 strokes per round.
+5. **Zoom in** with `get_state_snapshot(region=bbox)`, using the `bbox` that `paint_stroke` returns. Pick up colors with `sample_color`, then add small detail strokes.
+6. **Blend** edges with `"tool": "smudge"`, clean up with `"tool": "eraser"`, and add highlights last.
 
 ```json
 {"strokes": [
