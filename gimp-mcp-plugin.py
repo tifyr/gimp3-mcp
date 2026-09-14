@@ -533,6 +533,13 @@ class MCPPlugin(Gimp.PlugIn):
             
             # Validate region parameters if provided
             if region:
+                unknown = sorted(set(region) - {"origin_x", "origin_y", "width", "height", "max_width", "max_height"})
+                if unknown:
+                    return {
+                        "status": "error",
+                        "error": f"Unknown region keys {unknown}; use origin_x, origin_y, width, height "
+                                 f"and optionally max_width, max_height"
+                    }
                 # Validate region parameter types
                 for key, expected_type in [("origin_x", int), ("origin_y", int), 
                                          ("width", int), ("height", int),
@@ -556,16 +563,8 @@ class MCPPlugin(Gimp.PlugIn):
             scaled_to_width = region.get("max_width")  # Region scaling uses max_width/max_height
             scaled_to_height = region.get("max_height")
 
-            # Get the current images
-            images = Gimp.get_images()
-            if not images:
-                return {
-                    "status": "error",
-                    "error": "No images are currently open in GIMP"
-                }
-            
-            # Use the first image (most recently active)
-            original_image = images[0]
+            # Snapshot the requested image; images[0] is only the most recently opened one.
+            original_image = self._get_image(int(params.get("image_index", 0)))
             
             # Get original image dimensions
             orig_img_width = original_image.get_width()
@@ -596,54 +595,11 @@ class MCPPlugin(Gimp.PlugIn):
                                f"requested region: ({origin_x},{origin_y}) {region_width}x{region_height}"
                     }
                 
-                # Create new image with the region
-                working_image = Gimp.Image.new(region_width, region_height, original_image.get_base_type())
+                # Crop a duplicate so the region shows every visible layer (not just the
+                # top one) and the user's selection and clipboard are left untouched.
+                working_image = original_image.duplicate()
                 should_delete_working = True
-                
-                # Copy the region from original image
-                # First, select the region in the original image
-                original_image.select_rectangle(Gimp.ChannelOps.REPLACE, origin_x, origin_y, region_width, region_height)
-                
-                # Get the active layer from original image
-                orig_layers = original_image.get_layers()
-                if not orig_layers:
-                    return {
-                        "status": "error",
-                        "error": "No layers found in original image"
-                    }
-                
-                # Create a new layer in working image
-                # In GIMP 3.0+, use the image's base type instead of layer.get_image_type()
-                try:
-                    # Try to get layer type - fallback to image base type
-                    if hasattr(orig_layers[0], 'get_type'):
-                        layer_type = orig_layers[0].get_type()
-                    else:
-                        # Use image base type as fallback
-                        layer_type = original_image.get_base_type()
-                except AttributeError:
-                    # Final fallback - use RGB
-                    layer_type = Gimp.ImageBaseType.RGB
-                
-                new_layer = Gimp.Layer.new(working_image, 'Region', region_width, region_height, 
-                                         layer_type, 100, Gimp.LayerMode.NORMAL)
-                working_image.insert_layer(new_layer, None, 0)
-                
-                # Copy and paste the selection
-                Gimp.edit_copy([orig_layers[0]])
-                floating_sel = Gimp.edit_paste(new_layer, True)[0]
-                Gimp.floating_sel_anchor(floating_sel)
-                
-                # Clear selection
-                try:
-                    # Try different methods to clear selection based on GIMP version
-                    if hasattr(original_image, 'select_none'):
-                        original_image.select_none()
-                    else:
-                        # Use Gimp.Selection.none() for GIMP 3.0+
-                        Gimp.Selection.none(original_image)
-                except (AttributeError, RuntimeError) as e:
-                    print(f"Warning: Could not clear selection: {e}")
+                working_image.crop(region_width, region_height, origin_x, origin_y)
                 
             else:
                 # Case 2: Full image
