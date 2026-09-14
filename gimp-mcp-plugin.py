@@ -3164,30 +3164,42 @@ class MCPPlugin(Gimp.PlugIn):
         }
 
     @staticmethod
-    def _apply_paint_context(spec):
+    def _call_checked(fn, *args):
+        """Call a libgimp function and raise if it reports failure.
+
+        Wrapped PDB calls return False instead of raising (GIMP shows the error
+        in a dialog), so an unchecked failure never reaches the MCP client.
+        """
+        if fn(*args) is False:
+            name = getattr(fn, "__name__", repr(fn))
+            raise RuntimeError(f"{name} failed: {Gimp.get_pdb().get_last_error()}")
+
+    def _apply_paint_context(self, spec):
         """Set brush, color and paint options for one stroke on the pushed context.
 
         Every option is set explicitly so results don't depend on whatever the
         user last picked in GIMP's tool options.
         """
+        call = self._call_checked
         if spec["color"] is not None:
-            Gimp.context_set_foreground(spec["color"])
-        Gimp.context_set_brush(spec["brush"])
-        Gimp.context_set_brush_size(spec["size"])
-        Gimp.context_set_brush_angle(spec["angle"])
-        Gimp.context_set_brush_aspect_ratio(spec["aspect_ratio"])
+            call(Gimp.context_set_foreground, spec["color"])
+        call(Gimp.context_set_brush, spec["brush"])
+        call(Gimp.context_set_brush_size, spec["size"])
+        call(Gimp.context_set_brush_angle, spec["angle"])
+        call(Gimp.context_set_brush_aspect_ratio, spec["aspect_ratio"])
         if spec["hardness"] is None:
-            Gimp.context_set_brush_default_hardness()
+            call(Gimp.context_set_brush_default_hardness)
         else:
-            Gimp.context_set_brush_hardness(spec["hardness"])
+            call(Gimp.context_set_brush_hardness, spec["hardness"])
         if spec["spacing"] is None:
-            Gimp.context_set_brush_default_spacing()
+            call(Gimp.context_set_brush_default_spacing)
         else:
-            Gimp.context_set_brush_spacing(spec["spacing"])
-        Gimp.context_set_opacity(spec["opacity"])
-        Gimp.context_set_paint_mode(spec["mode"])
-        Gimp.context_set_dynamics_name("Dynamics Off")
-        Gimp.context_set_emulate_brush_dynamics(False)
+            call(Gimp.context_set_brush_spacing, spec["spacing"])
+        call(Gimp.context_set_opacity, spec["opacity"])
+        call(Gimp.context_set_paint_mode, spec["mode"])
+        # GIMP 3 has no "Dynamics Off" preset; dynamics are switched off instead.
+        call(Gimp.context_enable_dynamics, False)
+        call(Gimp.context_set_emulate_brush_dynamics, False)
 
     @staticmethod
     def _catmull_rom_controls(points):
@@ -3227,19 +3239,19 @@ class MCPPlugin(Gimp.PlugIn):
         finally:
             image.remove_path(path)
 
-    @staticmethod
-    def _paint_points(drawable, tool, coords, strength):
+    def _paint_points(self, drawable, tool, coords, strength):
         """Paint along coords (image coordinates) with GIMP's plain paint procedures."""
+        call = self._call_checked
         if tool == "paintbrush":
-            Gimp.paintbrush(drawable, 0, coords, Gimp.PaintApplicationMode.CONSTANT, 0)
+            call(Gimp.paintbrush, drawable, 0, coords, Gimp.PaintApplicationMode.CONSTANT, 0)
         elif tool == "pencil":
-            Gimp.pencil(drawable, coords)
+            call(Gimp.pencil, drawable, coords)
         elif tool == "airbrush":
-            Gimp.airbrush(drawable, strength, coords)
+            call(Gimp.airbrush, drawable, strength, coords)
         elif tool == "eraser":
-            Gimp.eraser(drawable, coords, Gimp.BrushApplicationMode.SOFT, Gimp.PaintApplicationMode.CONSTANT)
+            call(Gimp.eraser, drawable, coords, Gimp.BrushApplicationMode.SOFT, Gimp.PaintApplicationMode.CONSTANT)
         else:
-            Gimp.smudge(drawable, strength, coords)
+            call(Gimp.smudge, drawable, strength, coords)
 
     def _paint_tapered(self, image, drawable, spec):
         """Stroke a path with emulated brush dynamics, which tapers both ends.
@@ -3247,13 +3259,16 @@ class MCPPlugin(Gimp.PlugIn):
         The plain paint procedures take no pressure, so pressure-based dynamics
         do nothing there; stroking a path with emulation on is what tapers.
         """
-        Gimp.context_set_dynamics_name("Pressure Opacity" if spec["taper_affects"] == "opacity" else "Pressure Size")
-        Gimp.context_set_emulate_brush_dynamics(True)
-        Gimp.context_set_stroke_method(Gimp.StrokeMethod.PAINT_METHOD)
-        Gimp.context_set_paint_method(PAINT_METHODS[spec["tool"]])
+        call = self._call_checked
+        call(Gimp.context_enable_dynamics, True)
+        call(Gimp.context_set_dynamics_name,
+             "Pressure Opacity" if spec["taper_affects"] == "opacity" else "Pressure Size")
+        call(Gimp.context_set_emulate_brush_dynamics, True)
+        call(Gimp.context_set_stroke_method, Gimp.StrokeMethod.PAINT_METHOD)
+        call(Gimp.context_set_paint_method, PAINT_METHODS[spec["tool"]])
         path, _stroke_id = self._build_paint_path(image, spec)
         try:
-            drawable.edit_stroke_item(path)
+            call(drawable.edit_stroke_item, path)
         finally:
             image.remove_path(path)
 
