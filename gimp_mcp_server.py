@@ -147,7 +147,8 @@ def new_canvas(
     Parameters:
     - width: Canvas width in pixels
     - height: Canvas height in pixels
-    - name: Layer/image name (default: "Untitled")
+    - name: Image name reported by list_images, also used for the background layer
+      (default: "Untitled")
     - color_mode: "RGB" (default), "RGBA", "GRAY", "GRAYA"
     - fill: Fill color for the background layer. Any CSS color name or
             hex string: "white" (default), "black", "transparent",
@@ -156,6 +157,7 @@ def new_canvas(
 
     Returns:
     - image_id: internal GIMP image ID
+    - name: the image name
     - width / height: confirmed dimensions
     - color_mode: confirmed mode
     - display_opened: whether a GIMP window was opened
@@ -426,6 +428,11 @@ def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) ->
     - Use api_path="exec" to execute Python code in GIMP
     - args[0] should be "pyGObject-console" for executing commands
     - args[1] should be array of Python code strings to execute
+    - Each array item runs as its own exec(): put a multi-line block (for/if/def)
+      in ONE item with embedded newlines, not split across items
+    - Only print() output is returned (one string per item); bare expressions are
+      not echoed. To get values back, use args[0] = "pyGObject-eval" with a list of
+      expressions, e.g. ["pyGObject-eval", ["len(Gimp.get_images())"]]
     - Commands execute in persistent context - imports and variables persist
     - Always call Gimp.displays_flush() after drawing operations
 
@@ -472,7 +479,8 @@ def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) ->
     Important Tips:
     - When filling layers with color, ensure layer has alpha channel using Gimp.Layer.add_alpha()
     - Use Gimp.Drawable.fill() for reliable full-layer fills
-    - Specify colors precisely with rgb(R, G, B) or rgba(R, G, B, A) to avoid transparency issues
+    - Specify colors as hex ("#rrggbb"): rgb() floats are read as linear light, and
+      unknown color names silently become a translucent cyan
     - After drawing operations, always call Gimp.displays_flush()
     - After selection operations for drawing, unselect with Gimp.Selection.none(image1)
 
@@ -564,7 +572,7 @@ def save_xcf(ctx: Context, file_path: str, image_index: int = 0) -> dict:
 
     Parameters:
     - file_path: Absolute path for the output .xcf file
-    - image_index: Index of the image to save (default 0 = first open image)
+    - image_index: Index of the image to save (default 0 = most recently opened; see list_images)
 
     Returns:
     - status: "success" or "error"
@@ -1143,7 +1151,8 @@ def rotate_image(
 
     Parameters:
     - angle: Rotation in degrees — 90, 180, 270 use lossless GIMP rotation;
-             other values rotate all layers with interpolation and flatten
+             other values rotate all layers about the center with interpolation,
+             enlarge the canvas to fit, and flatten
     - image_index: Target image index (default 0)
 
     Returns status dict.
@@ -2389,7 +2398,7 @@ def apply_emboss(
     Parameters:
     - azimuth: Light direction in degrees 0-360 (default 315 = top-left)
     - elevation: Light elevation angle 0-90 (default 45)
-    - depth: Effect depth/intensity (default 2)
+    - depth: Effect depth/intensity, whole number 1-100 (default 2)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -2412,16 +2421,16 @@ def apply_emboss(
 @mcp.tool()
 def apply_vignette(
     ctx: Context,
-    softness: float = 3.0,
-    shape: float = 1.0,
+    softness: float = 0.8,
+    shape: str = "circle",
     layer_name: str | None = None,
     image_index: int = 0
 ) -> dict:
     """Apply a vignette darkening effect around the edges of a layer.
 
     Parameters:
-    - softness: Edge softness / fade width (default 3.0)
-    - shape: Shape factor — 1.0 = elliptical (default), values >1 = more rectangular
+    - softness: Edge softness / fade width, 0.0-1.0 (default 0.8)
+    - shape: "circle" (default), "square", "diamond", "horizontal" or "vertical"
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -2704,6 +2713,10 @@ def export_social_media_kit(
 def list_images(ctx: Context) -> dict:
     """List all images currently open in GIMP.
 
+    Index 0 is the most recently opened or created image, and indices shift when
+    images are opened or closed; image_id stays the same for an image's lifetime.
+    Every image_index parameter uses this order.
+
     Returns:
     - images: list of {index, image_id, name, width, height, color_mode,
                        num_layers, file_path, is_dirty}
@@ -2822,21 +2835,25 @@ def get_pixel_color(
     x: int,
     y: int,
     image_index: int = 0,
-    layer_name: str | None = None
+    layer_name: str | None = None,
+    sample_merged: bool = True
 ) -> dict:
     """Get the color of a single pixel.
 
     Parameters:
-    - x, y: Pixel coordinates
+    - x, y: Image pixel coordinates
     - image_index: Target image index (default 0)
-    - layer_name: Layer to sample from; defaults to active layer
+    - layer_name: Layer to sample when sample_merged is false; defaults to active layer
+    - sample_merged: true (default) samples what is visible across all layers;
+      false samples only one layer
 
-    Returns: {color_hex, color_rgb: [r, g, b], alpha}
+    Returns: {color_hex (sRGB), color_rgb: [r, g, b], alpha (0-255), sampled (what was read)}
     """
     try:
         conn = get_gimp_connection()
         result = conn.send_command("get_pixel_color", {
             "x": x, "y": y, "image_index": image_index, "layer_name": layer_name,
+            "sample_merged": sample_merged,
         })
         if result["status"] == "success":
             return result["results"]
