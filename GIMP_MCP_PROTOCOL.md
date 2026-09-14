@@ -62,7 +62,7 @@ All tools return MCP-compliant data that AI assistants can process directly.
 
 #### `paint_stroke(strokes, layer_name=None, image_index=0, preview=False, preview_max_size=768)`
 Paints a batch of up to 50 brush strokes on one layer as a single undo step, so an agent can paint a few strokes, look, and continue.
-- **Stroke fields**: `points` (list of `[x, y]` in image coordinates), `tool` (`paintbrush`, `pencil`, `airbrush`, `eraser`, `smudge`), `brush`, `size`, `color` (hex only), `opacity`, `hardness`, `angle`, `aspect_ratio`, `spacing`, `pressure` (`"taper"`, `"none"` or a list of 0–1 values), `taper_affects` (`size` or `opacity`), `smooth`, `mode`, `strength` (airbrush and smudge)
+- **Stroke fields**: `points` (list of `[x, y]` in image coordinates), `tool` (`paintbrush`, `pencil`, `airbrush`, `eraser`, `smudge`), `brush`, `size`, `color` (hex, or one of the 16 basic CSS names such as `white`), `opacity`, `hardness`, `angle`, `aspect_ratio`, `spacing`, `pressure` (`"taper"`, `"none"` or a list of 0–1 values), `taper_affects` (`size` or `opacity`), `smooth`, `mode`, `strength` (airbrush and smudge)
 - **Validation**: every stroke is checked before anything is painted
 - **Returns**: `strokes_painted`, `layer`, `bbox` (a region for `get_state_snapshot`), `warnings`, and a preview image when `preview=True`
 

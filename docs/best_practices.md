@@ -124,7 +124,7 @@ For painterly work (brush textures, tapered strokes, blending), use the `paint_s
 **Stroke tips:**
 - 3–12 points per stroke is enough. `smooth` (on by default) turns them into a curve.
 - `"pressure": "taper"` (the default) thins both ends like a real brush stroke, and `"taper_affects": "opacity"` fades them instead. Use `"none"` for an even stroke, or a list such as `[0.2, 1, 0.6]` for a custom pressure curve (paintbrush, pencil and airbrush only).
-- Colors must be hex (`#8b4513`). GIMP turns unknown color names into cyan without an error, and reads `rgb()` values as linear light, so they come out lighter.
+- Colors are hex (`#8b4513`) or one of the 16 basic CSS names (`white`, `black`, `red`, ...). Other names and `rgb()` are rejected with an error.
 - A leftover selection clips strokes. `paint_stroke` warns when one is active.
 
 **Brushes that paint well** (`list_brushes` lists all of them):
