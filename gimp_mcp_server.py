@@ -2043,7 +2043,9 @@ def paint_stroke(
 
     Paint a few strokes (typically 3-30), look at the result (preview=True or
     get_state_snapshot), then paint the next batch. All strokes in one call
-    land on one layer and undo as one step. Every stroke is validated before
+    land on one layer and form a single undo step in GIMP's own history.
+    To be able to discard a round, paint it on a new layer (create_layer)
+    and remove it with delete_layer. Every stroke is validated before
     anything is painted.
 
     Parameters:
@@ -2726,48 +2728,6 @@ def set_active_image(ctx: Context, image_index: int) -> dict:
     except Exception as e:
         traceback.print_exc()
         raise Exception(f"set_active_image failed: {e}")
-
-
-@mcp.tool()
-def undo(ctx: Context, steps: int = 1, image_index: int = 0) -> dict:
-    """Undo one or more operations on an image.
-
-    Parameters:
-    - steps: Number of undo steps (default 1)
-    - image_index: Target image index (default 0)
-
-    Returns: {steps_undone}
-    """
-    try:
-        conn = get_gimp_connection()
-        result = conn.send_command("undo", {"steps": steps, "image_index": image_index})
-        if result["status"] == "success":
-            return result["results"]
-        raise Exception(result.get("error", "Unknown error"))
-    except Exception as e:
-        traceback.print_exc()
-        raise Exception(f"undo failed: {e}")
-
-
-@mcp.tool()
-def redo(ctx: Context, steps: int = 1, image_index: int = 0) -> dict:
-    """Redo one or more previously undone operations on an image.
-
-    Parameters:
-    - steps: Number of redo steps (default 1)
-    - image_index: Target image index (default 0)
-
-    Returns: {steps_redone}
-    """
-    try:
-        conn = get_gimp_connection()
-        result = conn.send_command("redo", {"steps": steps, "image_index": image_index})
-        if result["status"] == "success":
-            return result["results"]
-        raise Exception(result.get("error", "Unknown error"))
-    except Exception as e:
-        traceback.print_exc()
-        raise Exception(f"redo failed: {e}")
 
 
 @mcp.tool()

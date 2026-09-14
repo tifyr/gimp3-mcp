@@ -452,10 +452,6 @@ class MCPPlugin(Gimp.PlugIn):
                 return self._list_images(j.get("params", {}))
             elif "type" in j and j["type"] == "set_active_image":
                 return self._set_active_image(j.get("params", {}))
-            elif "type" in j and j["type"] == "undo":
-                return self._undo(j.get("params", {}))
-            elif "type" in j and j["type"] == "redo":
-                return self._redo(j.get("params", {}))
             elif "type" in j and j["type"] == "convert_color_mode":
                 return self._convert_color_mode(j.get("params", {}))
             elif "type" in j and j["type"] == "close_image":
@@ -3371,7 +3367,7 @@ class MCPPlugin(Gimp.PlugIn):
                         drawable = self._paint_one_stroke(image, drawable, spec)
                     except Exception as e:
                         raise RuntimeError(f"stroke {i} failed after {i} strokes were painted "
-                                           f"(undo reverts the whole batch): {e}") from e
+                                           f"(the batch is one undo step in GIMP): {e}") from e
             finally:
                 Gimp.context_pop()
                 image.undo_group_end()
@@ -4236,40 +4232,6 @@ class MCPPlugin(Gimp.PlugIn):
                     pass
             Gimp.displays_flush()
             return {"status": "success", "results": {"status": "success", "image_id": image.get_id()}}
-        except Exception as e:
-            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
-
-    def _undo(self, params):
-        """Undo N steps."""
-        try:
-            image_index = int(params.get("image_index", 0))
-            steps       = int(params.get("steps", 1))
-            image = self._get_image(image_index)
-            done = 0
-            for _ in range(steps):
-                if image.undo():
-                    done += 1
-                else:
-                    break
-            Gimp.displays_flush()
-            return {"status": "success", "results": {"steps_undone": done}}
-        except Exception as e:
-            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
-
-    def _redo(self, params):
-        """Redo N steps."""
-        try:
-            image_index = int(params.get("image_index", 0))
-            steps       = int(params.get("steps", 1))
-            image = self._get_image(image_index)
-            done = 0
-            for _ in range(steps):
-                if image.redo():
-                    done += 1
-                else:
-                    break
-            Gimp.displays_flush()
-            return {"status": "success", "results": {"steps_redone": done}}
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 

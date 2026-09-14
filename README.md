@@ -442,7 +442,6 @@ GIMP_MCP_DEBUG=1 uv run --directory /path/to/gimp-mcp gimp_mcp_server.py
 ## Future Enhancements
 
 - **📚 Recipe Collection**: Reusable workflow templates (portrait cleanup, product photo, etc.)
-- **↩️ Undo System**: History management and rollback via MCP
 - **🚀 Dynamic Discovery**: Auto-generate MCP tools from GIMP's full PDB procedure database
 - **🔒 Security**: Sandboxed execution for untrusted command inputs
 - **⚡ Performance**: Optimized bitmap transfer for large images
