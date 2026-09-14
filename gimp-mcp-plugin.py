@@ -24,12 +24,27 @@ import tempfile
 import os
 import platform
 import signal
+import math
 
 # Constants for configuration and thresholds
 LARGE_SCALING_THRESHOLD = 4.0  # Warn if scaling ratio exceeds this value
 MAX_REGION_SIZE = 8192  # Maximum region dimension in pixels
 DEFAULT_TIMEOUT_SECONDS = 30  # Default timeout for operations
 LISTEN_BACKLOG = 16  # Pending connections kept while commands run one at a time
+PAINT_MAX_STROKES = 50  # Strokes accepted by one paint_stroke call
+PAINT_MAX_POINTS = 2000  # Points accepted per paint_stroke stroke
+PAINT_DEFAULT_BRUSH = "2. Hardness 050"
+PAINT_METHODS = {  # paint_stroke tool name -> GIMP paint method
+    "paintbrush": "gimp-paintbrush",
+    "pencil":     "gimp-pencil",
+    "airbrush":   "gimp-airbrush",
+    "eraser":     "gimp-eraser",
+    "smudge":     "gimp-smudge",
+}
+PAINT_STROKE_KEYS = {
+    "points", "tool", "brush", "size", "color", "opacity", "hardness", "angle", "aspect_ratio",
+    "spacing", "pressure", "taper_affects", "smooth", "mode", "strength",
+}
 
 
 def N_(message): return message
@@ -395,6 +410,12 @@ class MCPPlugin(Gimp.PlugIn):
                 return self._fill_ellipse(j.get("params", {}))
             elif "type" in j and j["type"] == "gradient_fill":
                 return self._gradient_fill(j.get("params", {}))
+            elif "type" in j and j["type"] == "paint_stroke":
+                return self._paint_stroke(j.get("params", {}))
+            elif "type" in j and j["type"] == "list_brushes":
+                return self._list_brushes(j.get("params", {}))
+            elif "type" in j and j["type"] == "sample_color":
+                return self._sample_color(j.get("params", {}))
             # ── Category 7: Text ──────────────────────────────────────────────
             elif "type" in j and j["type"] == "add_text":
                 return self._add_text(j.get("params", {}))
@@ -3022,6 +3043,370 @@ class MCPPlugin(Gimp.PlugIn):
                 image.undo_group_end()
             Gimp.displays_flush()
             return {"status": "success", "results": {"status": "success"}}
+        except Exception as e:
+            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+    # ── Painting: paint_stroke / list_brushes / sample_color ─────────────────
+
+    @staticmethod
+    def _paint_number(value, lo, hi, label):
+        """Return value as a float within [lo, hi], or raise ValueError naming label."""
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} must be a number (got {value!r})") from None
+        if not lo <= number <= hi:
+            raise ValueError(f"{label} must be between {lo:g} and {hi:g} (got {value!r})")
+        return number
+
+    @staticmethod
+    def _parse_paint_color(value, label):
+        """Parse #rgb, #rrggbb or #rrggbbaa into a Gegl.Color.
+
+        Gegl.Color.new() turns unknown names into a translucent cyan without an
+        error and reads rgb() floats as linear light, so only hex is accepted.
+        """
+        from gi.repository import Gegl
+        digits = value[1:] if isinstance(value, str) and value.startswith("#") else ""
+        if len(digits) not in (3, 6, 8) or any(c not in "0123456789abcdefABCDEF" for c in digits):
+            raise ValueError(f"{label}: color must be hex like '#8b4513' (got {value!r})")
+        return Gegl.Color.new(value)
+
+    def _validate_paint_stroke(self, raw, index, warnings):
+        """Check one paint_stroke entry and resolve it into ready-to-use values.
+
+        Every stroke is checked before anything is painted, so a bad stroke
+        never leaves half a batch on the canvas.
+        """
+        where = f"stroke {index}"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{where}: must be an object")
+        unknown = sorted(set(raw) - PAINT_STROKE_KEYS)
+        if unknown:
+            raise ValueError(f"{where}: unknown keys {unknown}")
+
+        points = raw.get("points")
+        if not isinstance(points, list) or not points:
+            raise ValueError(f"{where}: points must be a non-empty list of [x, y] pairs")
+        if len(points) > PAINT_MAX_POINTS:
+            raise ValueError(f"{where}: at most {PAINT_MAX_POINTS} points per stroke (got {len(points)})")
+        coords = []
+        for point in points:
+            if not (isinstance(point, (list, tuple)) and len(point) == 2):
+                raise ValueError(f"{where}: each point must be [x, y] (got {point!r})")
+            coords.append((self._paint_number(point[0], -1e6, 1e6, f"{where}: x"),
+                           self._paint_number(point[1], -1e6, 1e6, f"{where}: y")))
+
+        tool = str(raw.get("tool", "paintbrush")).lower()
+        if tool not in PAINT_METHODS:
+            raise ValueError(f"{where}: tool must be one of {', '.join(PAINT_METHODS)} (got {tool!r})")
+
+        brush_name = str(raw.get("brush") or PAINT_DEFAULT_BRUSH)
+        brush = Gimp.Brush.get_by_name(brush_name)
+        if brush is None:
+            raise ValueError(f"{where}: brush {brush_name!r} not found; call list_brushes for names")
+
+        color = None
+        if raw.get("color") is not None:
+            color = self._parse_paint_color(raw["color"], where)
+            if tool in ("eraser", "smudge"):
+                warnings.append(f"{where}: color is ignored by the {tool}")
+
+        mode_name = str(raw.get("mode", "normal"))
+        mode = self._blend_mode_from_string(mode_name)
+        if mode == Gimp.LayerMode.NORMAL and mode_name.upper() != "NORMAL":
+            raise ValueError(f"{where}: unknown mode {mode_name!r}; use e.g. normal, multiply, screen, overlay, soft_light")
+
+        pressure = raw.get("pressure", "taper")
+        if isinstance(pressure, list):
+            if len(pressure) < 2:
+                raise ValueError(f"{where}: a pressure list needs at least 2 values")
+            if tool not in ("paintbrush", "pencil", "airbrush"):
+                raise ValueError(f"{where}: a pressure list works with paintbrush, pencil and airbrush; "
+                                 f"use 'taper' or 'none' for the {tool}")
+            pressure = [self._paint_number(v, 0, 1, f"{where}: pressure value") for v in pressure]
+        else:
+            pressure = str(pressure).lower()
+            if pressure not in ("taper", "none"):
+                raise ValueError(f"{where}: pressure must be 'taper', 'none' or a list of 0-1 values "
+                                 f"(got {raw.get('pressure')!r})")
+
+        taper_affects = str(raw.get("taper_affects", "size")).lower()
+        if taper_affects not in ("size", "opacity"):
+            raise ValueError(f"{where}: taper_affects must be 'size' or 'opacity' (got {taper_affects!r})")
+
+        smooth = raw.get("smooth", True)
+        if not isinstance(smooth, bool):
+            raise ValueError(f"{where}: smooth must be true or false (got {smooth!r})")
+
+        if "strength" in raw and pressure == "taper" and tool in ("airbrush", "smudge"):
+            warnings.append(f"{where}: strength is ignored with pressure 'taper'; use pressure 'none' to control it")
+
+        def optional(key, lo, hi):
+            return None if raw.get(key) is None else self._paint_number(raw[key], lo, hi, f"{where}: {key}")
+
+        return {
+            "points":        coords,
+            "tool":          tool,
+            "brush":         brush,
+            "color":         color,
+            "size":          self._paint_number(raw.get("size", 20), 1, 10000, f"{where}: size"),
+            "opacity":       self._paint_number(raw.get("opacity", 100), 0, 100, f"{where}: opacity"),
+            "hardness":      optional("hardness", 0, 1),
+            "angle":         self._paint_number(raw.get("angle", 0), -180, 180, f"{where}: angle"),
+            "aspect_ratio":  self._paint_number(raw.get("aspect_ratio", 0), -20, 20, f"{where}: aspect_ratio"),
+            "spacing":       optional("spacing", 0.01, 50),
+            "strength":      self._paint_number(raw.get("strength", 50), 0, 100, f"{where}: strength"),
+            "pressure":      pressure,
+            "taper_affects": taper_affects,
+            "smooth":        smooth,
+            "mode":          mode,
+        }
+
+    @staticmethod
+    def _apply_paint_context(spec):
+        """Set brush, color and paint options for one stroke on the pushed context.
+
+        Every option is set explicitly so results don't depend on whatever the
+        user last picked in GIMP's tool options.
+        """
+        if spec["color"] is not None:
+            Gimp.context_set_foreground(spec["color"])
+        Gimp.context_set_brush(spec["brush"])
+        Gimp.context_set_brush_size(spec["size"])
+        Gimp.context_set_brush_angle(spec["angle"])
+        Gimp.context_set_brush_aspect_ratio(spec["aspect_ratio"])
+        if spec["hardness"] is None:
+            Gimp.context_set_brush_default_hardness()
+        else:
+            Gimp.context_set_brush_hardness(spec["hardness"])
+        if spec["spacing"] is None:
+            Gimp.context_set_brush_default_spacing()
+        else:
+            Gimp.context_set_brush_spacing(spec["spacing"])
+        Gimp.context_set_opacity(spec["opacity"])
+        Gimp.context_set_paint_mode(spec["mode"])
+        Gimp.context_set_dynamics_name("Dynamics Off")
+        Gimp.context_set_emulate_brush_dynamics(False)
+
+    @staticmethod
+    def _catmull_rom_controls(points):
+        """Bezier control points (in-handle, anchor, out-handle) for a smooth curve through points."""
+        controls = []
+        last = len(points) - 1
+        for i, (x, y) in enumerate(points):
+            px, py = points[max(i - 1, 0)]
+            nx, ny = points[min(i + 1, last)]
+            dx, dy = (nx - px) / 6.0, (ny - py) / 6.0
+            controls += [x - dx, y - dy, x, y, x + dx, y + dy]
+        return controls
+
+    def _build_paint_path(self, image, spec):
+        """Insert a temporary path for the stroke; return (path, stroke_id). Caller removes it."""
+        points = spec["points"]
+        path = Gimp.Path.new(image, "paint_stroke")
+        image.insert_path(path, None, 0)
+        if spec["smooth"] and len(points) > 2:
+            stroke_id = path.stroke_new_from_points(
+                Gimp.PathStrokeType.BEZIER, self._catmull_rom_controls(points), False)
+        else:
+            stroke_id = path.bezier_stroke_new_moveto(*points[0])
+            for x, y in points[1:]:
+                path.bezier_stroke_lineto(stroke_id, x, y)
+        return path, stroke_id
+
+    def _stroke_coords(self, image, spec):
+        """Flat [x0, y0, x1, y1, ...] along the stroke, densified along the curve when smoothing."""
+        points = spec["points"]
+        if not (spec["smooth"] and len(points) > 2):
+            return [c for point in points for c in point]
+        path, stroke_id = self._build_paint_path(image, spec)
+        try:
+            coords, _closed = path.stroke_interpolate(stroke_id, 1.0)
+            return list(coords)
+        finally:
+            image.remove_path(path)
+
+    @staticmethod
+    def _paint_points(drawable, tool, coords, strength):
+        """Paint along coords (image coordinates) with GIMP's plain paint procedures."""
+        if tool == "paintbrush":
+            Gimp.paintbrush(drawable, 0, coords, Gimp.PaintApplicationMode.CONSTANT, 0)
+        elif tool == "pencil":
+            Gimp.pencil(drawable, coords)
+        elif tool == "airbrush":
+            Gimp.airbrush(drawable, strength, coords)
+        elif tool == "eraser":
+            Gimp.eraser(drawable, coords, Gimp.BrushApplicationMode.SOFT, Gimp.PaintApplicationMode.CONSTANT)
+        else:
+            Gimp.smudge(drawable, strength, coords)
+
+    def _paint_tapered(self, image, drawable, spec):
+        """Stroke a path with emulated brush dynamics, which tapers both ends.
+
+        The plain paint procedures take no pressure, so pressure-based dynamics
+        do nothing there; stroking a path with emulation on is what tapers.
+        """
+        Gimp.context_set_dynamics_name("Pressure Opacity" if spec["taper_affects"] == "opacity" else "Pressure Size")
+        Gimp.context_set_emulate_brush_dynamics(True)
+        Gimp.context_set_stroke_method(Gimp.StrokeMethod.PAINT_METHOD)
+        Gimp.context_set_paint_method(PAINT_METHODS[spec["tool"]])
+        path, _stroke_id = self._build_paint_path(image, spec)
+        try:
+            drawable.edit_stroke_item(path)
+        finally:
+            image.remove_path(path)
+
+    def _paint_with_pressure(self, image, drawable, spec, coords):
+        """Paint segment by segment, scaling brush size by the pressure curve.
+
+        Segments overlap at their joins, which shows as dark beads when opacity
+        is below 100 or a blend mode is used. In that case paint on a buffer
+        layer at full strength and merge it down with the stroke's opacity and
+        mode. Returns the layer to keep painting on (merging replaces it).
+        """
+        points = list(zip(coords[0::2], coords[1::2]))
+        dist = [0.0]
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            dist.append(dist[-1] + math.hypot(x1 - x0, y1 - y0))
+        total = dist[-1] or 1.0
+        curve = spec["pressure"]
+        steps = len(curve) - 1
+
+        def pressure_at(t):
+            pos = t * steps
+            i = min(int(pos), steps - 1)
+            return curve[i] + (curve[i + 1] - curve[i]) * (pos - i)
+
+        buffered = spec["opacity"] < 100 or spec["mode"] != Gimp.LayerMode.NORMAL
+        target = drawable
+        if buffered:
+            layer_type = (Gimp.ImageType.RGBA_IMAGE if image.get_base_type() == Gimp.ImageBaseType.RGB
+                          else Gimp.ImageType.GRAYA_IMAGE)
+            target = Gimp.Layer.new(image, "paint_stroke buffer", drawable.get_width(), drawable.get_height(),
+                                    layer_type, 100, Gimp.LayerMode.NORMAL)
+            image.insert_layer(target, drawable.get_parent(), image.get_item_position(drawable))
+            _ok, off_x, off_y = drawable.get_offsets()
+            target.set_offsets(off_x, off_y)
+            Gimp.context_set_opacity(100)
+            Gimp.context_set_paint_mode(Gimp.LayerMode.NORMAL)
+
+        for i in range(len(points) - 1):
+            t = (dist[i] + dist[i + 1]) / 2 / total
+            Gimp.context_set_brush_size(max(1.0, spec["size"] * pressure_at(t)))
+            self._paint_points(target, spec["tool"], [*points[i], *points[i + 1]], spec["strength"])
+
+        if not buffered:
+            return drawable
+        target.set_opacity(spec["opacity"])
+        target.set_mode(spec["mode"])
+        return image.merge_down(target, Gimp.MergeType.CLIP_TO_BOTTOM_LAYER)
+
+    def _paint_one_stroke(self, image, drawable, spec):
+        """Paint one validated stroke and return the layer to keep painting on."""
+        self._apply_paint_context(spec)
+        pressure = spec["pressure"]
+        if len(spec["points"]) == 1 or pressure == "none":
+            self._paint_points(drawable, spec["tool"], self._stroke_coords(image, spec), spec["strength"])
+            return drawable
+        if pressure == "taper":
+            self._paint_tapered(image, drawable, spec)
+            return drawable
+        return self._paint_with_pressure(image, drawable, spec, self._stroke_coords(image, spec))
+
+    @staticmethod
+    def _paint_bbox(image, specs):
+        """Region covering all strokes, clamped to the image, in get_state_snapshot's region format."""
+        x0 = y0 = float("inf")
+        x1 = y1 = float("-inf")
+        for spec in specs:
+            pad = spec["size"] / 2 + 2
+            for x, y in spec["points"]:
+                x0, y0 = min(x0, x - pad), min(y0, y - pad)
+                x1, y1 = max(x1, x + pad), max(y1, y + pad)
+        left, top = max(0, int(x0)), max(0, int(y0))
+        right, bottom = min(image.get_width(), math.ceil(x1)), min(image.get_height(), math.ceil(y1))
+        return {"x": left, "y": top, "width": max(0, right - left), "height": max(0, bottom - top)}
+
+    def _paint_stroke(self, params):
+        """Paint a batch of brush strokes on one layer as a single undo step."""
+        try:
+            image_index = int(params.get("image_index", 0))
+            layer_name  = params.get("layer_name", None)
+            strokes     = params.get("strokes")
+            image    = self._get_image(image_index)
+            drawable = self._resolve_layer(image, layer_name, None)
+            if drawable.is_group():
+                raise ValueError(f"Layer '{drawable.get_name()}' is a layer group; paint on a normal layer")
+            if not isinstance(strokes, list) or not strokes:
+                raise ValueError("strokes must be a non-empty list")
+            if len(strokes) > PAINT_MAX_STROKES:
+                raise ValueError(f"at most {PAINT_MAX_STROKES} strokes per call (got {len(strokes)})")
+
+            warnings = []
+            specs = [self._validate_paint_stroke(raw, i, warnings) for i, raw in enumerate(strokes)]
+            if not Gimp.Selection.is_empty(image):
+                warnings.append("A selection is active, so strokes are clipped to it; call select_none to paint everywhere")
+
+            image.undo_group_start()
+            Gimp.context_push()
+            try:
+                for i, spec in enumerate(specs):
+                    try:
+                        drawable = self._paint_one_stroke(image, drawable, spec)
+                    except Exception as e:
+                        raise RuntimeError(f"stroke {i} failed after {i} strokes were painted "
+                                           f"(undo reverts the whole batch): {e}") from e
+            finally:
+                Gimp.context_pop()
+                image.undo_group_end()
+            Gimp.displays_flush()
+            return {
+                "status": "success",
+                "results": {
+                    "strokes_painted": len(specs),
+                    "layer":           drawable.get_name(),
+                    "bbox":            self._paint_bbox(image, specs),
+                    "warnings":        warnings,
+                },
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+    def _list_brushes(self, params):
+        """List brush names, optionally filtered."""
+        try:
+            filt = params.get("filter", None) or ""
+            raw = Gimp.brushes_get_list(filt)
+            brushes = list(raw[1]) if isinstance(raw, tuple) else list(raw)
+            names = [brush.get_name() for brush in brushes]
+            return {"status": "success", "results": {"brushes": names, "count": len(names)}}
+        except Exception as e:
+            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+
+    def _sample_color(self, params):
+        """Pick the color at image coordinates, returned as sRGB hex."""
+        try:
+            image_index   = int(params.get("image_index", 0))
+            layer_name    = params.get("layer_name", None)
+            x             = float(params.get("x", 0))
+            y             = float(params.get("y", 0))
+            radius        = float(params.get("radius", 0))
+            sample_merged = bool(params.get("sample_merged", True))
+            image = self._get_image(image_index)
+            if not (0 <= x < image.get_width() and 0 <= y < image.get_height()):
+                raise ValueError(f"({x:g}, {y:g}) is outside the {image.get_width()}x{image.get_height()} image")
+            drawable = self._resolve_layer(image, layer_name, None)
+            ok, color = image.pick_color([drawable], x, y, sample_merged, radius > 0, radius)
+            if not ok or color is None:
+                raise RuntimeError(f"Could not sample a color at ({x:g}, {y:g})")
+            # get_rgba() is linear light; hex must be sRGB to round-trip with paint_stroke colors.
+            rgba = color.get_rgba_with_space(None)
+            r, g, b = (max(0, min(255, round(v * 255))) for v in (rgba.red, rgba.green, rgba.blue))
+            return {
+                "status": "success",
+                "results": {"color_hex": f"#{r:02x}{g:02x}{b:02x}", "alpha": round(rgba.alpha, 3)},
+            }
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 

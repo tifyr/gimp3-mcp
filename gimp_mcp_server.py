@@ -2012,6 +2012,142 @@ def gradient_fill(
         raise Exception(f"gradient_fill failed: {e}")
 
 
+# No return annotation: the result is a dict, or [dict, Image] with preview=True,
+# and an annotation would make FastMCP validate it as structured output.
+@mcp.tool()
+def paint_stroke(
+    ctx: Context,
+    strokes: list[dict],
+    layer_name: str | None = None,
+    image_index: int = 0,
+    preview: bool = False,
+    preview_max_size: int = 768,
+):
+    """Paint a batch of brush strokes, working in rounds like a painter.
+
+    Paint a few strokes (typically 3-30), look at the result (preview=True or
+    get_state_snapshot), then paint the next batch. All strokes in one call
+    land on one layer and undo as one step. Every stroke is validated before
+    anything is painted.
+
+    Parameters:
+    - strokes: 1-50 stroke objects. Only "points" is required:
+        - points: [[x, y], ...] in image pixels, 1-2000 points (one point paints a dab).
+          3-12 points are enough for a curve.
+        - tool: "paintbrush" (default), "pencil" (hard edge), "airbrush", "eraser", "smudge"
+        - brush: Brush name from list_brushes (default "2. Hardness 050")
+        - size: Brush size in pixels, 1-10000 (default 20)
+        - color: Hex "#rrggbb", "#rgb" or "#rrggbbaa" (default: current foreground).
+          Color names and rgb() are rejected. Ignored by eraser and smudge.
+        - opacity: 0-100 (default 100)
+        - hardness: 0-1 (default: the brush's own)
+        - angle: -180 to 180 degrees (default 0); aspect_ratio: -20 to 20 (default 0)
+        - spacing: Distance between dabs as a fraction of brush size, 0.01-50 (default: the brush's own)
+        - pressure: "taper" (default; thin ends like a real stroke), "none" (even width),
+          or a list of 0-1 values spread evenly along the stroke, e.g. [0.2, 1, 0.5]
+          (paintbrush, pencil and airbrush only)
+        - taper_affects: "size" (default) or "opacity" (ends fade instead of thinning)
+        - smooth: true (default) turns the points into a smooth curve; false draws straight segments
+        - mode: Blend mode, e.g. "normal" (default), "multiply", "screen", "overlay", "soft_light"
+        - strength: 0-100 (default 50) for airbrush and smudge; applies with pressure "none"
+          or a pressure list, not with "taper"
+    - layer_name: Layer to paint on; defaults to the active layer
+    - image_index: Target image index (default 0)
+    - preview: Also return a snapshot of the whole image after painting
+    - preview_max_size: Longest side of the preview in pixels (default 768)
+
+    Returns {strokes_painted, layer, bbox, warnings}, plus the preview image when
+    preview=True. bbox is {x, y, width, height} around the strokes; pass it to
+    get_state_snapshot(region=...) to zoom in on what was just painted.
+
+    Example:
+        strokes=[
+          {"points": [[100, 400], [300, 330], [520, 380]], "brush": "Oils 01", "size": 120, "color": "#3b6e8f"},
+          {"points": [[140, 420], [300, 370]], "brush": "Bristles 02", "size": 40, "color": "#d9a441", "opacity": 80},
+          {"points": [[250, 360], [330, 350]], "tool": "smudge", "size": 50, "pressure": "none", "strength": 40}
+        ]
+    """
+    try:
+        conn = get_gimp_connection()
+        result = conn.send_command("paint_stroke", {
+            "strokes": strokes, "layer_name": layer_name, "image_index": image_index,
+        })
+        if result["status"] != "success":
+            raise Exception(result.get("error", "Unknown error"))
+        summary = result["results"]
+        if not preview:
+            return summary
+        snap = conn.send_command("get_image_bitmap", {
+            "image_index": image_index, "max_width": preview_max_size, "max_height": preview_max_size,
+        })
+        if snap["status"] != "success":
+            summary["warnings"].append(f"preview failed: {snap.get('error', 'Unknown error')}")
+            return summary
+        return [summary, Image(data=base64.b64decode(snap["results"]["image_data"]), format="png")]
+    except Exception as e:
+        traceback.print_exc()
+        raise Exception(f"paint_stroke failed: {e}")
+
+
+@mcp.tool()
+def list_brushes(ctx: Context, filter: str | None = None) -> dict:
+    """List brushes available to paint_stroke.
+
+    Parameters:
+    - filter: Optional regular expression matched against brush names, e.g. "Oils|Bristles"
+
+    Brushes that paint well: "2. Hardness 025" to "100" (plain round), "Acrylic 01"/"03"
+    (dry, textured), "Bristles 01" to "03" (streaky), "Oils 01" to "03" (soft blending),
+    "Charcoal 01"/"Chalk 01" (grainy), "Pencil 02" (sketchy line), "Sponge 01" (soft texture).
+
+    Returns: {brushes: [name, ...], count}
+    """
+    try:
+        conn = get_gimp_connection()
+        result = conn.send_command("list_brushes", {"filter": filter})
+        if result["status"] == "success":
+            return result["results"]
+        raise Exception(result.get("error", "Unknown error"))
+    except Exception as e:
+        traceback.print_exc()
+        raise Exception(f"list_brushes failed: {e}")
+
+
+@mcp.tool()
+def sample_color(
+    ctx: Context,
+    x: float,
+    y: float,
+    radius: float = 0,
+    sample_merged: bool = True,
+    layer_name: str | None = None,
+    image_index: int = 0
+) -> dict:
+    """Pick a color from the canvas, like a painter's eyedropper.
+
+    Parameters:
+    - x, y: Image coordinates in pixels
+    - radius: Average the color over this many pixels around the point (default 0 = one pixel)
+    - sample_merged: true (default) samples what is visible across all layers; false samples one layer
+    - layer_name: Layer to sample when sample_merged is false; defaults to the active layer
+    - image_index: Target image index (default 0)
+
+    Returns: {color_hex: "#rrggbb" (sRGB, usable as a paint_stroke color), alpha: 0-1}
+    """
+    try:
+        conn = get_gimp_connection()
+        result = conn.send_command("sample_color", {
+            "x": x, "y": y, "radius": radius, "sample_merged": sample_merged,
+            "layer_name": layer_name, "image_index": image_index,
+        })
+        if result["status"] == "success":
+            return result["results"]
+        raise Exception(result.get("error", "Unknown error"))
+    except Exception as e:
+        traceback.print_exc()
+        raise Exception(f"sample_color failed: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CATEGORY 7 — Text
 # ─────────────────────────────────────────────────────────────────────────────

@@ -137,6 +137,9 @@ t('draw_ellipse',   cmd('draw_ellipse',   {'image_index': 0, 'x': 10, 'y': 10, '
 t('fill_rectangle', cmd('fill_rectangle', {'image_index': 0, 'x': 5, 'y': 5, 'width': 20, 'height': 20, 'color': '#ffff00'}))
 t('fill_ellipse',   cmd('fill_ellipse',   {'image_index': 0, 'x': 5, 'y': 5, 'width': 20, 'height': 20, 'color': '#ff00ff'}))
 t('gradient_fill',  cmd('gradient_fill',  {'image_index': 0, 'x1': 0, 'y1': 0, 'x2': 80, 'y2': 80}))
+t('list_brushes',   cmd('list_brushes',   {}))
+t('paint_stroke',   cmd('paint_stroke',   {'image_index': 0, 'strokes': [{'points': [[10, 10], [40, 30], [70, 10]], 'color': '#000000', 'size': 6}]}))
+t('sample_color',   cmd('sample_color',   {'image_index': 0, 'x': 10, 'y': 10}))
 
 print()
 print("=== Cat 7: Text ===")

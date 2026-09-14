@@ -266,6 +266,9 @@ Lower-level bitmap fetch with region extraction and scaling. Returns base64-enco
 | `draw_line` | Draw a line (pencil or paintbrush) |
 | `draw_rectangle` | Draw a rectangle outline |
 | `draw_ellipse` | Draw an ellipse outline |
+| `paint_stroke` | Paint batches of brush strokes (textured brushes, taper, smudge, eraser) |
+| `list_brushes` | List available brushes |
+| `sample_color` | Pick a color from the canvas as hex |
 | `gradient_fill` | Apply linear or radial gradient |
 | `set_colors` | Set foreground/background colors |
 

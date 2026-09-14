@@ -58,6 +58,20 @@ Execute GIMP 3.0 API methods through PyGObject console.
 For image operations, use `get_image_bitmap()` for full image export, `get_image_metadata()` for fast information gathering, or `get_gimp_info()` for environment discovery.
 All tools return MCP-compliant data that AI assistants can process directly.
 
+### 3. Painting Tools
+
+#### `paint_stroke(strokes, layer_name=None, image_index=0, preview=False, preview_max_size=768)`
+Paints a batch of up to 50 brush strokes on one layer as a single undo step, so an agent can paint a few strokes, look, and continue.
+- **Stroke fields**: `points` (list of `[x, y]` in image coordinates), `tool` (`paintbrush`, `pencil`, `airbrush`, `eraser`, `smudge`), `brush`, `size`, `color` (hex only), `opacity`, `hardness`, `angle`, `aspect_ratio`, `spacing`, `pressure` (`"taper"`, `"none"` or a list of 0–1 values), `taper_affects` (`size` or `opacity`), `smooth`, `mode`, `strength` (airbrush and smudge)
+- **Validation**: every stroke is checked before anything is painted
+- **Returns**: `strokes_painted`, `layer`, `bbox` (a region for `get_state_snapshot`), `warnings`, and a preview image when `preview=True`
+
+#### `list_brushes(filter=None)`
+Returns brush names to use with `paint_stroke`.
+
+#### `sample_color(x, y, radius=0, sample_merged=True, layer_name=None, image_index=0)`
+Returns the color at image coordinates as sRGB hex (`color_hex`) plus `alpha`, optionally averaged over `radius` pixels.
+
 ## Basic Method
 
 ### Function Call Structure
