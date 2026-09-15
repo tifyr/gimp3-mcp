@@ -3,14 +3,18 @@
 # Adds: new_canvas, check_server, restart_server, no bitmap size restrictions
 
 from mcp.server.fastmcp import FastMCP, Context, Image
+import anyio
+import functools
 import socket
 import json
 import logging
 import base64
+import threading
 import traceback
 import time
 from pathlib import Path
 
+# In stdio mode stdout carries the MCP messages: log to stderr (basicConfig's default), never print().
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("GimpMCPServer")
 
@@ -27,6 +31,8 @@ class GimpConnection:
         self.host = host
         self.port = port
         self.sock = None
+        # A command uses the socket in self.sock; two threads sharing it crossed replies and hung.
+        self._lock = threading.Lock()
 
     def connect(self):
         if self.sock:
@@ -51,6 +57,10 @@ class GimpConnection:
             self.sock = None
 
     def send_command(self, command_type, params=None):
+        with self._lock:
+            return self._send_command(command_type, params)
+
+    def _send_command(self, command_type, params):
         if not self.sock:
             self.connect()
         command = {"type": command_type, "params": params or {"args": []}}
@@ -121,6 +131,28 @@ valid values. call_api runs Python inside GIMP for anything the tools do not cov
 """
 
 mcp = FastMCP("GimpMCP", instructions=INSTRUCTIONS)
+
+# FastMCP calls synchronous tools on its event loop, so one slow GIMP call stalled every
+# other request, pings and cancellations included. Run each tool in a worker thread instead,
+# one at a time and in arrival order: GIMP runs commands serially, and tools depend on the
+# order they were sent in (image_index 0, the active layer).
+_tool_order_lock = anyio.Lock()
+_register_tool = mcp.tool
+
+
+def _tool_in_worker_thread(*args, **kwargs):
+    register = _register_tool(*args, **kwargs)
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def run(*fn_args, **fn_kwargs):
+            async with _tool_order_lock:
+                return await anyio.to_thread.run_sync(functools.partial(fn, *fn_args, **fn_kwargs))
+        return register(run)
+    return decorator
+
+
+mcp.tool = _tool_in_worker_thread
 
 @mcp.tool()
 def check_server(ctx: Context) -> dict:
@@ -253,7 +285,7 @@ def get_image_bitmap(
     """
     try:
 
-        print("Requesting current image bitmap from GIMP...")
+        logger.info("Requesting current image bitmap from GIMP...")
 
         conn = get_gimp_connection()
         
@@ -305,7 +337,7 @@ def get_image_metadata(ctx: Context, image_index: int = 0) -> dict:
     - Raises exception if no images are open
     """
     try:
-        print("Requesting current image metadata from GIMP...")
+        logger.info("Requesting current image metadata from GIMP...")
         
         conn = get_gimp_connection()
         result = conn.send_command("get_image_metadata", {"image_index": image_index})
@@ -338,7 +370,7 @@ def get_gimp_info(ctx: Context) -> dict:
     - Raises exception if GIMP connection fails
     """
     try:
-        print("Requesting GIMP environment information...")
+        logger.info("Requesting GIMP environment information...")
 
         conn = get_gimp_connection()
         result = conn.send_command("get_gimp_info")
@@ -387,7 +419,7 @@ def get_state_snapshot(
     """
     try:
         if label:
-            print(f"[snapshot] {label}")
+            logger.info(f"[snapshot] {label}")
         conn = get_gimp_connection()
         params: dict = {"image_index": image_index}
         if max_size:
@@ -420,11 +452,11 @@ def get_context_state(ctx: Context) -> dict:
     Check context state before operations that depend on specific settings.
 
     Returns information about:
-    - Foreground and background colors (RGB/RGBA values)
+    - Foreground and background colors as sRGB hex ("#rrggbb", as tools accept) and alpha 0-1
     - Current brush and its properties
     - Opacity setting (0-100%)
-    - Paint/blend mode
-    - Feather state and radius
+    - Paint mode, named like set_layer_properties blend modes (e.g. "NORMAL")
+    - Feather state and radius [x, y]
     - Antialiasing state
 
     Use cases:
@@ -450,7 +482,7 @@ def get_context_state(ctx: Context) -> dict:
 
 
 @mcp.tool()
-def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) -> str:
+def call_api(ctx: Context, api_path: str, args: list | None = None, kwargs: dict | None = None) -> str:
     """Call GIMP 3.2 API methods through PyGObject console.
 
     GIMP MCP Protocol:
@@ -530,7 +562,7 @@ def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) ->
     """
     try:
         conn = get_gimp_connection()
-        result = conn.send_command("call_api", {"api_path": api_path, "args": args, "kwargs": kwargs})
+        result = conn.send_command("call_api", {"api_path": api_path, "args": args or [], "kwargs": kwargs or {}})
         if result["status"] == "success":
             return json.dumps(result["results"])
         else:
@@ -1246,10 +1278,11 @@ def resize_canvas(
     - anchor: Position of existing content — "center" (default), "top-left", "top",
               "top-right", "left", "right", "bottom-left", "bottom", "bottom-right"
     - fill: New canvas areas: "transparent" (default) or a color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
-      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple). A color is painted on a new
+      bottom layer named "Canvas fill"; existing layers and the selection are left as they are
     - image_index: Target image index (default 0)
 
-    Returns: {status, width, height, offset_x, offset_y}
+    Returns: {status, width, height, offset_x, offset_y, fill_layer (its name, or null)}
     """
     try:
         conn = get_gimp_connection()
@@ -1733,7 +1766,8 @@ def list_layers(ctx: Context, image_index: int = 0) -> dict:
 
     Returns: {layers: [{index, name, id, visible, opacity, blend_mode, width, height,
               has_alpha, offsets, active}], count}. Index 0 is the top layer; active marks the
-    layer that tools use when layer_name is omitted.
+    layer that tools use when layer_name is omitted. blend_mode uses set_layer_properties
+    names (e.g. "NORMAL"); offsets is [x, y].
     """
     try:
         conn = get_gimp_connection()
@@ -2305,7 +2339,10 @@ def edit_text(
       olive, lime, green, aqua, teal, blue, navy, fuchsia, purple) (omit to leave unchanged)
     - image_index: Target image index (default 0)
 
-    Returns status dict.
+    All values are checked before anything changes. A font name GIMP does not have falls back to
+    a similar or default font, so check the returned font.
+
+    Returns: {layer_name (it can change with the text), text, font, size}
     """
     try:
         conn = get_gimp_connection()
@@ -2628,11 +2665,10 @@ def warp_region(
     image_index: int = 0,
     layer_name: str | None = None,
 ) -> dict:
-    """Warp / liquify a region of the image by pushing pixels in a direction.
+    """Disabled: always returns an error and leaves the image unchanged.
 
-    Uses GEGL's warp operation. Ideal for
-    subtle facial expression edits — e.g. turning a neutral mouth into a smile
-    by pushing the mouth corners upward.
+    On GIMP 3.2 this erased the whole layer instead of warping it, and GIMP 3.2 gives
+    plug-ins no working warp operation. Use GIMP's Warp Transform tool by hand.
 
     Parameters:
     - vectors: List of warp stroke dicts, each with:
@@ -2713,8 +2749,11 @@ def export_sprite_sheet(
     - output_path: Absolute path for the output PNG file
     - columns: Number of columns in the grid (defaults to square root of frame count)
     - padding: Pixel gap between frames (default 0)
-    - source: "layers" (each layer is a frame; default) or "images" (each open image)
+    - source: "layers" (each layer is a frame, in list_layers order; default) or "images"
+      (each open image's visible result, in list_images order)
     - image_index: Source image when source="layers" (default 0)
+
+    Each cell is the size of the first frame; bigger frames are cropped. Transparency is kept.
 
     Returns: {file_path, columns, rows, frame_width, frame_height, count}
     """
@@ -2830,8 +2869,8 @@ def convert_color_mode(
     """Convert an image to a different color mode.
 
     Parameters:
-    - mode: "RGB", "GRAY", or "INDEXED"
-    - num_colors: Number of colors for INDEXED mode (default 256)
+    - mode: "RGB", "RGBA", "GRAY", "GRAYA" (the A forms also add alpha to every layer) or "INDEXED"
+    - num_colors: Number of colors for INDEXED mode, 1-256 (default 256)
     - image_index: Target image index (default 0)
 
     Returns status dict.
@@ -2863,8 +2902,10 @@ def close_image(
 
     Parameters:
     - image_index: Index of the image to close (default 0 = most recently opened)
-    - save_first: If True, save as XCF before closing (default False). Without it,
-      unsaved changes are discarded.
+    - save_first: If True, save as XCF before closing (default False). An image opened from
+      an XCF file is saved over that file. Any other image is saved as a new .xcf next to the
+      file it came from (in the temp directory if it has none), named name-2.xcf, name-3.xcf, ...
+      instead of overwriting an existing file. Without save_first, unsaved changes are discarded.
 
     Returns: {closed_image_id, saved_to (XCF path, or null)}
     """
