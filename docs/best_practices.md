@@ -102,6 +102,42 @@ Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
 
 ---
 
+## ✅ PAINTING - Use paint_stroke, Look Often
+
+For painterly work (brush textures, tapered strokes, blending), use the `paint_stroke` tool instead of `call_api`. It paints a batch of strokes in one call and one undo step.
+
+**Work like a painter, in rounds:**
+1. **Start** with a canvas: `new_canvas(800, 800)` creates a white one, or `open_image(file_path)` opens a file. `paint_stroke` needs an open image.
+2. **Block in** big shapes with large soft or textured brushes (`Oils 01`, `Acrylic 01`, size 80–200).
+3. **Look** with `get_state_snapshot()`, or pass `preview=True` to `paint_stroke`.
+4. **Build forms** with medium brushes on a separate layer (`create_layer`), 5–20 strokes per round.
+5. **Zoom in** with `get_state_snapshot(region=bbox)`, using the `bbox` that `paint_stroke` returns. Pick up colors with `sample_color`, then add small detail strokes.
+6. **Blend** edges with `"tool": "smudge"`, clean up with `"tool": "eraser"`, and add highlights last.
+
+```json
+{"strokes": [
+  {"points": [[120, 400], [300, 340], [520, 380]], "brush": "Bristles 02", "size": 60, "color": "#8b4513"},
+  {"points": [[140, 430], [320, 380]], "tool": "smudge", "size": 40, "pressure": "none", "strength": 40}
+]}
+```
+
+**Stroke tips:**
+- 3–12 points per stroke is enough. `smooth` (on by default) turns them into a curve.
+- `"pressure": "taper"` (the default) thins both ends like a real brush stroke, and `"taper_affects": "opacity"` fades them instead. Use `"none"` for an even stroke, or a list such as `[0.2, 1, 0.6]` for a custom pressure curve (paintbrush, pencil and airbrush only).
+- Colors are hex (`#8b4513`) or one of the 16 basic CSS names (`white`, `black`, `red`, ...). Other names and `rgb()` are rejected with an error.
+- A leftover selection clips strokes. `paint_stroke` warns when one is active.
+
+**Brushes that paint well** (`list_brushes` lists all of them):
+- `2. Hardness 025` to `100`: plain round
+- `Acrylic 01`, `Acrylic 03`: dry and textured
+- `Bristles 01` to `03`: streaky bristles
+- `Oils 01` to `03`: soft blending
+- `Charcoal 01`, `Chalk 01`: grainy
+- `Pencil 02`: sketchy line
+- `Sponge 01`: soft texture
+
+---
+
 ## Common Recipes
 
 ### Initialization
@@ -234,7 +270,7 @@ Check `get_context_state()` before operations that depend on settings:
 ### Layer Management
 - When filling layers with color, ensure the layer has an alpha channel using `Gimp.Layer.add_alpha()`
 - Use `Gimp.Drawable.fill()` for reliable full-layer fills
-- Specify colors precisely with `rgb(R, G, B)` or `rgba(R, G, B, A)` to avoid transparency issues
+- Specify colors as hex (`#rrggbb`, or `#rrggbbaa` with alpha). Unknown color names become a translucent cyan, and `rgb()` floats are read as linear light, so they come out lighter than the same hex value
 
 ### Context Efficiency
 - No need to repeat import commands - once imported, packages remain available

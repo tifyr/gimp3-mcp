@@ -91,7 +91,36 @@ def reset_gimp_connection():
     _gimp_connection = None
 
 # MCP server
-mcp = FastMCP("GimpMCP", description="GIMP integration through MCP — with new_canvas, check_server, restart_server")
+INSTRUCTIONS = """\
+Tools for a running GIMP 3.2. The GIMP MCP plugin must be started inside GIMP
+(Tools > MCP > Start MCP Server); check_server tells you whether it is reachable.
+
+Images and layers
+- Start with new_canvas(width, height) or open_image(file_path).
+- image_index 0 is the most recently opened or created image, and indices shift when
+  images open or close. list_images shows the order; image_id stays the same.
+- Tools with an optional layer_name act on the active layer. A layer made by create_layer
+  or duplicate_layer becomes active, and list_layers marks the active layer. Pass
+  layer_name to be sure.
+
+Colors
+- Give colors as hex "#rrggbb" (also "#rgb" or "#rrggbbaa") or one of the 16 basic names:
+  black, white, gray, silver, red, maroon, yellow, olive, lime, green, aqua, teal, blue,
+  navy, fuchsia, purple. Anything else is rejected with an error.
+
+Seeing results
+- get_state_snapshot(image_index, max_size, region) returns the image as PNG scaled to fit
+  max_size; region coordinates are image pixels. sample_color reads the visible color at a point.
+
+Painting
+- paint_stroke paints batches of brush strokes; take a snapshot between batches.
+  list_brushes lists brush names.
+
+Options with a fixed list of values reject anything not listed, and the error names the
+valid values. call_api runs Python inside GIMP for anything the tools do not cover.
+"""
+
+mcp = FastMCP("GimpMCP", instructions=INSTRUCTIONS)
 
 @mcp.tool()
 def check_server(ctx: Context) -> dict:
@@ -104,7 +133,7 @@ def check_server(ctx: Context) -> dict:
     - error: description if not connected
 
     Use this before any other operation to verify the GIMP plugin is running.
-    If not connected, open GIMP and run Tools > Start MCP Server.
+    If not connected, open GIMP and run Tools > MCP > Start MCP Server.
     """
     try:
         test_conn = GimpConnection(GIMP_HOST, GIMP_PORT)
@@ -121,7 +150,7 @@ def restart_server(ctx: Context) -> dict:
     """Drop and re-establish the connection to the GIMP MCP plugin.
 
     Use this when:
-    - GIMP was restarted after Claude Code was already running
+    - GIMP was restarted after the MCP client was already running
     - The socket connection dropped mid-session
     - check_server() shows not connected but GIMP is open
 
@@ -147,15 +176,16 @@ def new_canvas(
     Parameters:
     - width: Canvas width in pixels
     - height: Canvas height in pixels
-    - name: Layer/image name (default: "Untitled")
+    - name: Image name reported by list_images, also used for the background layer
+      (default: "Untitled")
     - color_mode: "RGB" (default), "RGBA", "GRAY", "GRAYA"
-    - fill: Fill color for the background layer. Any CSS color name or
-            hex string: "white" (default), "black", "transparent",
-            "#FF5733", "rgb(100,200,50)", etc.
+    - fill: Background: "white" (default), "transparent", or a color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
     - resolution: DPI resolution (default: 72)
 
     Returns:
     - image_id: internal GIMP image ID
+    - name: the image name
     - width / height: confirmed dimensions
     - color_mode: confirmed mode
     - display_opened: whether a GIMP window was opened
@@ -184,9 +214,16 @@ def new_canvas(
 
 
 @mcp.tool()
-def get_image_bitmap(ctx: Context, max_width: int | None = None, max_height: int | None = None, region: dict | None = None) -> Image:
-    """Get the current open image in GIMP as an Image object with optional scaling and region selection.
+def get_image_bitmap(
+    ctx: Context,
+    max_width: int | None = None,
+    max_height: int | None = None,
+    region: dict | None = None,
+    image_index: int = 0,
+) -> Image:
+    """Get an open image in GIMP as an Image object with optional scaling and region selection.
 
+    Renders the image data (all visible layers), independent of GIMP's zoom or scroll.
     No size restrictions — pass any max_width/max_height you need.
     For large images, omit max_width/max_height to get the full resolution.
 
@@ -195,27 +232,24 @@ def get_image_bitmap(ctx: Context, max_width: int | None = None, max_height: int
     2. Region extraction with optional scaling (pass region dict)
 
     Parameters:
-    - max_width, max_height: Target dimensions for scaling (aspect-ratio preserved).
-      Omit for full resolution.
-    - region: Dictionary with keys:
+    - max_width, max_height: Box to scale the image into, preserving aspect ratio
+      (smaller images are enlarged). Omit for full resolution.
+    - region: Dictionary with keys (image pixel coordinates, integers):
         - origin_x, origin_y: Top-left corner of region to extract
         - width, height: Dimensions of region to extract
-        - max_width, max_height: Optional scaling for the extracted region
+        - max_width, max_height: Optional box to scale the region into (small regions are enlarged)
+        Other keys (such as x/y) are rejected.
+    - image_index: Which open image to render (default 0 = most recently opened;
+      see list_images)
 
     Examples:
     - Full image at full res: get_image_bitmap()
     - Full image scaled: get_image_bitmap(max_width=2048, max_height=2048)
     - Region: get_image_bitmap(region={"origin_x": 0, "origin_y": 0, "width": 512, "height": 512})
 
-    Returns:
-    - Image object containing PNG data in MCP-compliant format
-    - Includes width, height, and base64-encoded image data
+    get_state_snapshot is a shorter way to ask for the same image.
 
-    The returned Image object automatically handles base64 encoding and MIME types
-    according to the Model Context Protocol specification.
-
-    Raises:
-    - RuntimeError if no image is open, region is invalid, or export fails
+    Returns: the image as PNG. Fails if no image is open, the region is invalid, or export fails.
     """
     try:
 
@@ -224,7 +258,7 @@ def get_image_bitmap(ctx: Context, max_width: int | None = None, max_height: int
         conn = get_gimp_connection()
         
         # Build parameters for the bitmap request
-        params = {}
+        params = {"image_index": image_index}
         if max_width is not None:
             params["max_width"] = max_width
         if max_height is not None:
@@ -250,10 +284,13 @@ def get_image_bitmap(ctx: Context, max_width: int | None = None, max_height: int
 
 
 @mcp.tool()
-def get_image_metadata(ctx: Context) -> dict:
-    """Get metadata about the current open image in GIMP without the bitmap data.
+def get_image_metadata(ctx: Context, image_index: int = 0) -> dict:
+    """Get metadata about an open image in GIMP without the bitmap data.
+
+    Parameters:
+    - image_index: Which open image to describe (default 0 = most recently opened; see list_images)
     
-    Returns detailed information about the currently active image including:
+    Returns detailed information about the image including:
     - Image dimensions (width, height)
     - Color mode and base type
     - Number of layers and channels
@@ -271,7 +308,7 @@ def get_image_metadata(ctx: Context) -> dict:
         print("Requesting current image metadata from GIMP...")
         
         conn = get_gimp_connection()
-        result = conn.send_command("get_image_metadata")
+        result = conn.send_command("get_image_metadata", {"image_index": image_index})
         if result["status"] == "success":
             return result["results"]
         else:
@@ -323,13 +360,17 @@ def get_state_snapshot(
 ) -> Image:
     """Return a live visual snapshot of the current image state — no file save needed.
 
+    A shortcut for get_image_bitmap with a single max_size and x/y region keys.
+
     AI agents call this to get immediate visual feedback after any edit operation,
     letting them verify results and decide next steps without saving to disk.
 
     Parameters:
     - image_index: Which open image to snapshot (default: 0 = most recent)
-    - max_size: Maximum width/height of the returned preview in pixels (default: 512)
-    - region: Optional dict {x, y, width, height} to zoom into a specific area
+    - max_size: Longest side of the returned PNG in pixels (default: 512). The image or
+      region is scaled to fit, so small regions are enlarged: positions in the snapshot
+      are not image coordinates (multiply by region width / snapshot width).
+    - region: Optional dict {x, y, width, height} in image pixels to zoom into an area
               e.g. {"x": 200, "y": 300, "width": 100, "height": 80} for mouth area
     - label: Optional annotation label (logged but not drawn — for agent bookkeeping)
 
@@ -416,6 +457,11 @@ def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) ->
     - Use api_path="exec" to execute Python code in GIMP
     - args[0] should be "pyGObject-console" for executing commands
     - args[1] should be array of Python code strings to execute
+    - Each array item runs as its own exec(): put a multi-line block (for/if/def)
+      in ONE item with embedded newlines, not split across items
+    - Only print() output is returned (one string per item); bare expressions are
+      not echoed. To get values back, use args[0] = "pyGObject-eval" with a list of
+      expressions, e.g. ["pyGObject-eval", ["len(Gimp.get_images())"]]
     - Commands execute in persistent context - imports and variables persist
     - Always call Gimp.displays_flush() after drawing operations
 
@@ -462,7 +508,8 @@ def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) ->
     Important Tips:
     - When filling layers with color, ensure layer has alpha channel using Gimp.Layer.add_alpha()
     - Use Gimp.Drawable.fill() for reliable full-layer fills
-    - Specify colors precisely with rgb(R, G, B) or rgba(R, G, B, A) to avoid transparency issues
+    - Specify colors as hex ("#rrggbb"): rgb() floats are read as linear light, and
+      unknown color names silently become a translucent cyan
     - After drawing operations, always call Gimp.displays_flush()
     - After selection operations for drawing, unselect with Gimp.Selection.none(image1)
 
@@ -470,7 +517,7 @@ def call_api(ctx: Context, api_path: str, args: list = [], kwargs: dict = {}) ->
     - Use Gimp.get_images() instead of deprecated Gimp.list_images()
     - Use image.get_layers() instead of Gimp.get_active_layer()
     - gimpfu module not available in GIMP 3.2
-    - Colors created with Gegl.Color.new('color_name')
+    - Colors are created with Gegl.Color.new("#rrggbb")
     - Full API documentation: https://developer.gimp.org/api/3.0/libgimp/
 
     Parameters:
@@ -554,7 +601,7 @@ def save_xcf(ctx: Context, file_path: str, image_index: int = 0) -> dict:
 
     Parameters:
     - file_path: Absolute path for the output .xcf file
-    - image_index: Index of the image to save (default 0 = first open image)
+    - image_index: Index of the image to save (default 0 = most recently opened; see list_images)
 
     Returns:
     - status: "success" or "error"
@@ -874,6 +921,8 @@ def blur(
 ) -> dict:
     """Apply Gaussian blur to a layer.
 
+    Same as apply_gaussian_blur, but with separate horizontal and vertical radii.
+
     Parameters:
     - radius_x: Horizontal blur radius in pixels (default 5.0)
     - radius_y: Vertical blur radius in pixels (default 5.0)
@@ -1133,7 +1182,8 @@ def rotate_image(
 
     Parameters:
     - angle: Rotation in degrees — 90, 180, 270 use lossless GIMP rotation;
-             other values rotate all layers with interpolation and flatten
+             other values rotate all layers about the center with interpolation,
+             enlarge the canvas to fit, and flatten
     - image_index: Target image index (default 0)
 
     Returns status dict.
@@ -1195,7 +1245,8 @@ def resize_canvas(
     - width, height: New canvas dimensions in pixels
     - anchor: Position of existing content — "center" (default), "top-left", "top",
               "top-right", "left", "right", "bottom-left", "bottom", "bottom-right"
-    - fill: Color for new canvas areas — CSS color or "transparent"
+    - fill: New canvas areas: "transparent" (default) or a color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
     - image_index: Target image index (default 0)
 
     Returns: {status, width, height, offset_x, offset_y}
@@ -1305,7 +1356,8 @@ def select_by_color(
     """Select regions by color similarity.
 
     Parameters:
-    - color: Target color as CSS name, hex (#rrggbb), or rgb() string
+    - color: Target color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
     - threshold: Color similarity tolerance 0-255 (default 15)
     - operation: "replace" (default), "add", "subtract", "intersect"
     - image_index: Target image index (default 0)
@@ -1442,10 +1494,13 @@ def create_layer(
     Parameters:
     - name: Layer name (default "New Layer")
     - width, height: Layer dimensions; defaults to image dimensions
-    - fill: Initial fill — "transparent" (default), "white", "black", or any CSS color
+    - fill: "transparent" (default) or a color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
     - opacity: Layer opacity 0-100 (default 100)
-    - blend_mode: GIMP layer mode name — "NORMAL" (default), "MULTIPLY", "SCREEN", etc.
-    - position: Stack position — -1 = top (default), 0 = bottom
+    - blend_mode: NORMAL (default), MULTIPLY, SCREEN, OVERLAY, DARKEN, LIGHTEN, DODGE,
+      BURN, HARD_LIGHT, SOFT_LIGHT, DIFFERENCE, HUE, SATURATION, COLOR, LUMINOSITY or
+      DISSOLVE (case-insensitive; other names are rejected)
+    - position: Stack index, 0 = top of the stack; -1 (default) = directly above the active layer
     - image_index: Target image index (default 0)
 
     Returns: {layer_name, layer_id, width, height, position}
@@ -1575,7 +1630,9 @@ def set_layer_properties(
     Parameters:
     - layer_name / layer_index: Identify the layer (defaults to active layer)
     - opacity: New opacity 0-100 (omit to leave unchanged)
-    - blend_mode: New GIMP layer mode name (omit to leave unchanged)
+    - blend_mode: Omit to leave unchanged, or one of NORMAL (default), MULTIPLY, SCREEN, OVERLAY, DARKEN, LIGHTEN, DODGE,
+      BURN, HARD_LIGHT, SOFT_LIGHT, DIFFERENCE, HUE, SATURATION, COLOR, LUMINOSITY or
+      DISSOLVE (case-insensitive; other names are rejected)
     - visible: True/False visibility (omit to leave unchanged)
     - image_index: Target image index (default 0)
 
@@ -1607,7 +1664,7 @@ def reorder_layer(
     """Move a layer to a new stack position.
 
     Parameters:
-    - new_position: Target stack index (0 = bottom)
+    - new_position: Target stack index, 0 = top (same order as list_layers)
     - layer_name / layer_index: Identify the layer (defaults to active layer)
     - image_index: Target image index (default 0)
 
@@ -1674,7 +1731,9 @@ def list_layers(ctx: Context, image_index: int = 0) -> dict:
     Parameters:
     - image_index: Target image index (default 0)
 
-    Returns: {layers: [{name, id, visible, opacity, blend_mode, width, height, has_alpha}], count}
+    Returns: {layers: [{index, name, id, visible, opacity, blend_mode, width, height,
+              has_alpha, offsets, active}], count}. Index 0 is the top layer; active marks the
+    layer that tools use when layer_name is omitted.
     """
     try:
         conn = get_gimp_connection()
@@ -1701,7 +1760,8 @@ def fill_layer(
     """Fill an entire layer with a solid color.
 
     Parameters:
-    - color: Fill color as CSS name, hex, or rgb() string
+    - color: Fill color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
     - layer_name: Layer to fill; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -1731,8 +1791,10 @@ def fill_selection(
     """Fill the current selection with a color or fill type.
 
     Parameters:
-    - color: Fill color as CSS name, hex, or rgb() string (used when fill_type is omitted)
-    - fill_type: Fill type override: "foreground", "background", or "transparent"
+    - color: Fill color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple) (used when fill_type is omitted)
+    - fill_type: Instead of color: "foreground" or "background" (GIMP's current colors, see
+      set_colors), "pattern", or "transparent" (clears the selection). Give color or fill_type.
     - image_index: Target image index (default 0)
     - layer_name: Target layer; defaults to active layer
 
@@ -1761,8 +1823,9 @@ def set_colors(
     """Set the GIMP foreground and/or background color.
 
     Parameters:
-    - foreground: New foreground color (CSS name, hex, rgb()); omit to leave unchanged
-    - background: New background color; omit to leave unchanged
+    - foreground: New foreground color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); omit to leave unchanged
+    - background: New background color, same formats; omit to leave unchanged
 
     Returns: {foreground, background} confirmation dict.
     """
@@ -1797,7 +1860,8 @@ def draw_line(
     Parameters:
     - x1, y1: Start point
     - x2, y2: End point
-    - color: Stroke color (CSS / hex / rgb); uses current foreground if omitted
+    - color: Stroke color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); uses current foreground if omitted
     - width: Stroke width in pixels (default 2.0)
     - tool: "pencil" (default, hard edge) or "paintbrush" (soft edge)
     - layer_name: Target layer; defaults to active layer
@@ -1837,7 +1901,8 @@ def draw_rectangle(
     Parameters:
     - x, y: Top-left corner
     - width, height: Rectangle dimensions
-    - color: Stroke color; uses current foreground if omitted
+    - color: Stroke color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); uses current foreground if omitted
     - line_width: Stroke width in pixels (default 2.0)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
@@ -1876,7 +1941,8 @@ def draw_ellipse(
     Parameters:
     - x, y: Top-left corner of the bounding box
     - width, height: Bounding box dimensions
-    - color: Stroke color; uses current foreground if omitted
+    - color: Stroke color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); uses current foreground if omitted
     - line_width: Stroke width in pixels (default 2.0)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
@@ -1914,7 +1980,8 @@ def fill_rectangle(
     Parameters:
     - x, y: Top-left corner
     - width, height: Rectangle dimensions
-    - color: Fill color (CSS name, hex, or rgb() string)
+    - color: Fill color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -1950,7 +2017,8 @@ def fill_ellipse(
     Parameters:
     - x, y: Top-left corner of the bounding box
     - width, height: Bounding box dimensions
-    - color: Fill color (CSS name, hex, or rgb() string)
+    - color: Fill color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -1985,11 +2053,15 @@ def gradient_fill(
 ) -> dict:
     """Fill a layer or selection with a gradient.
 
+    With an active selection, only the selected part of the layer is filled.
+
     Parameters:
-    - color1: Start color (default "black")
-    - color2: End color (default "white")
-    - x1, y1: Gradient start point (default top-left 0,0)
-    - x2, y2: Gradient end point (defaults to bottom-right of image)
+    - color1: Start color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); default "black"
+    - color2: End color, same formats; default "white"
+    - x1, y1: Gradient start point in image pixels (default 0, 0)
+    - x2, y2: Gradient end point in image pixels (default: the image's bottom-right corner);
+      must differ from the start point
     - gradient_type: "linear" (default) or "radial"
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
@@ -2010,6 +2082,163 @@ def gradient_fill(
     except Exception as e:
         traceback.print_exc()
         raise Exception(f"gradient_fill failed: {e}")
+
+
+def _painting_error(result):
+    """Error text from a failed GIMP reply, pointing at new_canvas when no image is open.
+
+    Without the hint, agents that only see the painting tools conclude there is
+    no way to create an image.
+    """
+    error = result.get("error", "Unknown error")
+    if "No images are currently open" in error:
+        error += (". Create a canvas with new_canvas(width, height) or open a file with "
+                  "open_image(file_path), then paint on it.")
+    return error
+
+
+# No return annotation: the result is a dict, or [dict, Image] with preview=True,
+# and an annotation would make FastMCP validate it as structured output.
+@mcp.tool()
+def paint_stroke(
+    ctx: Context,
+    strokes: list[dict],
+    layer_name: str | None = None,
+    image_index: int = 0,
+    preview: bool = False,
+    preview_max_size: int = 768,
+):
+    """Paint a batch of brush strokes, working in rounds like a painter.
+
+    Paints on an open image. To start a new painting, first call
+    new_canvas(width, height) (white by default), or open a file with open_image.
+
+    Paint a few strokes (typically 3-30), look at the result (preview=True or
+    get_state_snapshot), then paint the next batch. All strokes in one call
+    land on one layer and form a single undo step in GIMP's own history.
+    To be able to discard a round, paint it on a new layer (create_layer)
+    and remove it with delete_layer. Every stroke is validated before
+    anything is painted.
+
+    Parameters:
+    - strokes: 1-50 stroke objects. Only "points" is required:
+        - points: [[x, y], ...] in image pixels, 1-2000 points (one point paints a dab).
+          3-12 points are enough for a curve.
+        - tool: "paintbrush" (default), "pencil" (hard edge), "airbrush", "eraser", "smudge"
+        - brush: Brush name from list_brushes (default "2. Hardness 050")
+        - size: Brush size in pixels, 1-10000 (default 20)
+        - color: Hex "#rrggbb", "#rgb" or "#rrggbbaa", or a basic name like "white"
+          (default: current foreground). rgb() and other names are rejected.
+          Ignored by eraser and smudge.
+        - opacity: 0-100 (default 100)
+        - hardness: 0-1 (default: the brush's own)
+        - angle: -180 to 180 degrees (default 0); aspect_ratio: -20 to 20 (default 0)
+        - spacing: Distance between dabs as a fraction of brush size, 0.01-50 (default: the brush's own)
+        - pressure: "taper" (default; thin ends like a real stroke), "none" (even width),
+          or a list of 0-1 values spread evenly along the stroke, e.g. [0.2, 1, 0.5]
+          (paintbrush, pencil and airbrush only)
+        - taper_affects: "size" (default) or "opacity" (ends fade instead of thinning)
+        - smooth: true (default) turns the points into a smooth curve; false draws straight segments
+        - mode: Blend mode, e.g. "normal" (default), "multiply", "screen", "overlay", "soft_light"
+        - strength: 0-100 (default 50) for airbrush and smudge; applies with pressure "none"
+          or a pressure list, not with "taper"
+    - layer_name: Layer to paint on; defaults to the active layer
+    - image_index: Target image index (default 0)
+    - preview: Also return a snapshot of the whole image after painting
+    - preview_max_size: Longest side of the preview in pixels (default 768)
+
+    Returns {strokes_painted, layer, bbox, warnings}, plus the preview image when
+    preview=True. bbox is {x, y, width, height} around the strokes; pass it to
+    get_state_snapshot(region=...) to zoom in on what was just painted.
+
+    Example:
+        strokes=[
+          {"points": [[100, 400], [300, 330], [520, 380]], "brush": "Oils 01", "size": 120, "color": "#3b6e8f"},
+          {"points": [[140, 420], [300, 370]], "brush": "Bristles 02", "size": 40, "color": "#d9a441", "opacity": 80},
+          {"points": [[250, 360], [330, 350]], "tool": "smudge", "size": 50, "pressure": "none", "strength": 40}
+        ]
+    """
+    try:
+        conn = get_gimp_connection()
+        result = conn.send_command("paint_stroke", {
+            "strokes": strokes, "layer_name": layer_name, "image_index": image_index,
+        })
+        if result["status"] != "success":
+            raise Exception(_painting_error(result))
+        summary = result["results"]
+        if not preview:
+            return summary
+        snap = conn.send_command("get_image_bitmap", {
+            "image_index": image_index, "max_width": preview_max_size, "max_height": preview_max_size,
+        })
+        if snap["status"] != "success":
+            summary["warnings"].append(f"preview failed: {snap.get('error', 'Unknown error')}")
+            return summary
+        return [summary, Image(data=base64.b64decode(snap["results"]["image_data"]), format="png")]
+    except Exception as e:
+        traceback.print_exc()
+        raise Exception(f"paint_stroke failed: {e}")
+
+
+@mcp.tool()
+def list_brushes(ctx: Context, filter: str | None = None) -> dict:
+    """List brushes available to paint_stroke.
+
+    Parameters:
+    - filter: Optional regular expression matched against brush names, e.g. "Oils|Bristles"
+
+    Brushes that paint well: "2. Hardness 025" to "100" (plain round), "Acrylic 01"/"03"
+    (dry, textured), "Bristles 01" to "03" (streaky), "Oils 01" to "03" (soft blending),
+    "Charcoal 01"/"Chalk 01" (grainy), "Pencil 02" (sketchy line), "Sponge 01" (soft texture).
+
+    Returns: {brushes: [name, ...], count}
+    """
+    try:
+        conn = get_gimp_connection()
+        result = conn.send_command("list_brushes", {"filter": filter})
+        if result["status"] == "success":
+            return result["results"]
+        raise Exception(result.get("error", "Unknown error"))
+    except Exception as e:
+        traceback.print_exc()
+        raise Exception(f"list_brushes failed: {e}")
+
+
+@mcp.tool()
+def sample_color(
+    ctx: Context,
+    x: float,
+    y: float,
+    radius: float = 0,
+    sample_merged: bool = True,
+    layer_name: str | None = None,
+    image_index: int = 0
+) -> dict:
+    """Pick a color from the canvas, like a painter's eyedropper.
+
+    Same as get_pixel_color, plus optional averaging over a radius.
+
+    Parameters:
+    - x, y: Image coordinates in pixels
+    - radius: Average the color over this many pixels around the point (default 0 = one pixel)
+    - sample_merged: true (default) samples what is visible across all layers; false samples one layer
+    - layer_name: Layer to sample when sample_merged is false; defaults to the active layer
+    - image_index: Target image index (default 0)
+
+    Returns: {color_hex: "#rrggbb" (sRGB, usable as a paint_stroke color), alpha: 0-1}
+    """
+    try:
+        conn = get_gimp_connection()
+        result = conn.send_command("sample_color", {
+            "x": x, "y": y, "radius": radius, "sample_merged": sample_merged,
+            "layer_name": layer_name, "image_index": image_index,
+        })
+        if result["status"] == "success":
+            return result["results"]
+        raise Exception(_painting_error(result))
+    except Exception as e:
+        traceback.print_exc()
+        raise Exception(f"sample_color failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2034,7 +2263,8 @@ def add_text(
     - x, y: Position of the text layer's top-left corner (default 0, 0)
     - font: Font family name — "Sans" (default), "Serif", etc.
     - size: Font size in pixels (default 24)
-    - color: Text color (CSS name, hex, or rgb() string; default "black")
+    - color: Text color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); default "black"
     - image_index: Target image index (default 0)
 
     Returns: {layer_name, layer_id, text_width, text_height, position}
@@ -2071,7 +2301,8 @@ def edit_text(
     - text: New text content (omit to leave unchanged)
     - font: New font family (omit to leave unchanged)
     - size: New font size in pixels (omit to leave unchanged)
-    - color: New text color (omit to leave unchanged)
+    - color: New text color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple) (omit to leave unchanged)
     - image_index: Target image index (default 0)
 
     Returns status dict.
@@ -2092,17 +2323,19 @@ def edit_text(
 
 
 @mcp.tool()
-def list_fonts(ctx: Context, filter: str | None = None) -> dict:
-    """List available fonts installed in GIMP.
+def list_fonts(ctx: Context, filter: str | None = None, limit: int = 100) -> dict:
+    """List fonts installed in GIMP.
 
     Parameters:
-    - filter: Optional string to filter font names (case-insensitive substring match)
+    - filter: Optional text matched against font names, case-insensitive (e.g. "sans")
+    - limit: Maximum number of names to return (default 100). There can be thousands of
+      fonts: if truncated is true, narrow with filter instead of assuming a font is missing.
 
-    Returns: {fonts: [font_name, ...], count}
+    Returns: {fonts: [font_name, ...], count (returned), total (matching filter), truncated}
     """
     try:
         conn = get_gimp_connection()
-        result = conn.send_command("list_fonts", {"filter": filter})
+        result = conn.send_command("list_fonts", {"filter": filter, "limit": limit})
         if result["status"] == "success":
             return result["results"]
         raise Exception(result.get("error", "Unknown error"))
@@ -2131,7 +2364,8 @@ def apply_drop_shadow(
     Parameters:
     - offset_x, offset_y: Shadow offset in pixels (default 5, 5)
     - blur_radius: Shadow softness radius (default 10)
-    - color: Shadow color (default "black")
+    - color: Shadow color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
+      olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); default "black"
     - opacity: Shadow opacity 0-100 (default 60)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
@@ -2161,6 +2395,8 @@ def apply_gaussian_blur(
     image_index: int = 0
 ) -> dict:
     """Apply Gaussian blur as a destructive filter operation.
+
+    Same as blur with equal horizontal and vertical radii.
 
     Parameters:
     - radius: Blur radius in pixels (default 5.0)
@@ -2225,7 +2461,7 @@ def apply_emboss(
     Parameters:
     - azimuth: Light direction in degrees 0-360 (default 315 = top-left)
     - elevation: Light elevation angle 0-90 (default 45)
-    - depth: Effect depth/intensity (default 2)
+    - depth: Effect depth/intensity, whole number 1-100 (default 2)
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -2248,16 +2484,16 @@ def apply_emboss(
 @mcp.tool()
 def apply_vignette(
     ctx: Context,
-    softness: float = 3.0,
-    shape: float = 1.0,
+    softness: float = 0.8,
+    shape: str = "circle",
     layer_name: str | None = None,
     image_index: int = 0
 ) -> dict:
     """Apply a vignette darkening effect around the edges of a layer.
 
     Parameters:
-    - softness: Edge softness / fade width (default 3.0)
-    - shape: Shape factor — 1.0 = elliptical (default), values >1 = more rectangular
+    - softness: Edge softness / fade width, 0.0-1.0 (default 0.8)
+    - shape: "circle" (default), "square", "diamond", "horizontal" or "vertical"
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)
 
@@ -2361,7 +2597,7 @@ def export_web_optimized(
     Parameters:
     - output_dir: Directory to write output files
     - jpeg_quality: JPEG quality 1-100 (default 85)
-    - png_compression: PNG compression level 0-9 (default 9)
+    - png_compression: PNG compression level, 0 (fastest, largest) to 9 (smallest; default)
     - max_width / max_height: Optional scaling before export
     - image_index: Source image index (default 0)
 
@@ -2394,7 +2630,7 @@ def warp_region(
 ) -> dict:
     """Warp / liquify a region of the image by pushing pixels in a direction.
 
-    Uses GEGL warp (GIMP 3 native) with plug-in-iwarp fallback. Ideal for
+    Uses GEGL's warp operation. Ideal for
     subtle facial expression edits — e.g. turning a neutral mouth into a smile
     by pushing the mouth corners upward.
 
@@ -2540,6 +2776,10 @@ def export_social_media_kit(
 def list_images(ctx: Context) -> dict:
     """List all images currently open in GIMP.
 
+    Index 0 is the most recently opened or created image, and indices shift when
+    images are opened or closed; image_id stays the same for an image's lifetime.
+    Every image_index parameter uses this order.
+
     Returns:
     - images: list of {index, image_id, name, width, height, color_mode,
                        num_layers, file_path, is_dirty}
@@ -2558,7 +2798,11 @@ def list_images(ctx: Context) -> dict:
 
 @mcp.tool()
 def set_active_image(ctx: Context, image_index: int) -> dict:
-    """Raise a specific image to the front / make it active in GIMP.
+    """Raise a specific image's window to the front in GIMP.
+
+    Works for images opened with new_canvas or open_image. GIMP 3 gives plug-ins
+    no way to find windows opened from GIMP's own menus, so those return an error;
+    every other tool still works on them by image_index.
 
     Parameters:
     - image_index: Index of the image to activate (from list_images)
@@ -2574,48 +2818,6 @@ def set_active_image(ctx: Context, image_index: int) -> dict:
     except Exception as e:
         traceback.print_exc()
         raise Exception(f"set_active_image failed: {e}")
-
-
-@mcp.tool()
-def undo(ctx: Context, steps: int = 1, image_index: int = 0) -> dict:
-    """Undo one or more operations on an image.
-
-    Parameters:
-    - steps: Number of undo steps (default 1)
-    - image_index: Target image index (default 0)
-
-    Returns: {steps_undone}
-    """
-    try:
-        conn = get_gimp_connection()
-        result = conn.send_command("undo", {"steps": steps, "image_index": image_index})
-        if result["status"] == "success":
-            return result["results"]
-        raise Exception(result.get("error", "Unknown error"))
-    except Exception as e:
-        traceback.print_exc()
-        raise Exception(f"undo failed: {e}")
-
-
-@mcp.tool()
-def redo(ctx: Context, steps: int = 1, image_index: int = 0) -> dict:
-    """Redo one or more previously undone operations on an image.
-
-    Parameters:
-    - steps: Number of redo steps (default 1)
-    - image_index: Target image index (default 0)
-
-    Returns: {steps_redone}
-    """
-    try:
-        conn = get_gimp_connection()
-        result = conn.send_command("redo", {"steps": steps, "image_index": image_index})
-        if result["status"] == "success":
-            return result["results"]
-        raise Exception(result.get("error", "Unknown error"))
-    except Exception as e:
-        traceback.print_exc()
-        raise Exception(f"redo failed: {e}")
 
 
 @mcp.tool()
@@ -2655,11 +2857,16 @@ def close_image(
 ) -> dict:
     """Close an image, optionally saving as XCF first.
 
-    Parameters:
-    - image_index: Index of the image to close (default 0)
-    - save_first: If True, save as XCF before closing (default False)
+    Closes images opened with new_canvas or open_image, and images that have no
+    window. GIMP 3 gives plug-ins no way to close a window opened from GIMP's own
+    menus, so for those images this returns an error and they must be closed in GIMP.
 
-    Returns status dict.
+    Parameters:
+    - image_index: Index of the image to close (default 0 = most recently opened)
+    - save_first: If True, save as XCF before closing (default False). Without it,
+      unsaved changes are discarded.
+
+    Returns: {closed_image_id, saved_to (XCF path, or null)}
     """
     try:
         conn = get_gimp_connection()
@@ -2700,21 +2907,28 @@ def get_pixel_color(
     x: int,
     y: int,
     image_index: int = 0,
-    layer_name: str | None = None
+    layer_name: str | None = None,
+    sample_merged: bool = True
 ) -> dict:
     """Get the color of a single pixel.
 
-    Parameters:
-    - x, y: Pixel coordinates
-    - image_index: Target image index (default 0)
-    - layer_name: Layer to sample from; defaults to active layer
+    sample_color does the same and can average over a radius; it reports alpha as 0-1,
+    this tool as 0-255.
 
-    Returns: {color_hex, color_rgb: [r, g, b], alpha}
+    Parameters:
+    - x, y: Image pixel coordinates
+    - image_index: Target image index (default 0)
+    - layer_name: Layer to sample when sample_merged is false; defaults to active layer
+    - sample_merged: true (default) samples what is visible across all layers;
+      false samples only one layer
+
+    Returns: {color_hex (sRGB), color_rgb: [r, g, b], alpha (0-255), sampled (what was read)}
     """
     try:
         conn = get_gimp_connection()
         result = conn.send_command("get_pixel_color", {
             "x": x, "y": y, "image_index": image_index, "layer_name": layer_name,
+            "sample_merged": sample_merged,
         })
         if result["status"] == "success":
             return result["results"]
@@ -2728,20 +2942,23 @@ def get_pixel_color(
 def get_histogram(
     ctx: Context,
     channel: str = "value",
-    image_index: int = 0
+    image_index: int = 0,
+    layer_name: str | None = None
 ) -> dict:
-    """Get histogram statistics for a channel of the active layer.
+    """Get histogram statistics for one channel of a layer.
 
     Parameters:
     - channel: "value" (all; default), "red", "green", "blue", "alpha"
     - image_index: Target image index (default 0)
+    - layer_name: Layer to measure; defaults to the active layer
 
-    Returns: {mean, median, std_dev, min, max, pixels, count}
+    Returns: {layer, mean, std_dev, median (on a 0-255 scale), pixels (in the layer),
+    count (pixels in range), percentile (fraction of pixels in range)}
     """
     try:
         conn = get_gimp_connection()
         result = conn.send_command("get_histogram", {
-            "channel": channel, "image_index": image_index,
+            "channel": channel, "image_index": image_index, "layer_name": layer_name,
         })
         if result["status"] == "success":
             return result["results"]
