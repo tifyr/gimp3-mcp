@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import socket
 import json
+import os
 import sys
 
 def cmd(t, params=None):
@@ -158,6 +159,56 @@ t('emboss',        cmd('apply_emboss',        {'image_index': 0}))
 t('vignette',      cmd('apply_vignette',      {'image_index': 0}))
 t('noise',         cmd('apply_noise',         {'image_index': 0}))
 t('drop_shadow',   cmd('apply_drop_shadow',   {'image_index': 0}))
+
+print()
+print("=== Regressions: check what the tool did, not only its status ===")
+t('reg_canvas', cmd('resize_canvas', {'image_index': 0, 'width': 120, 'height': 120, 'anchor': 'top-left'}))
+_count = cmd('list_layers', {'image_index': 0}).get('results', {}).get('count', 0)
+t('resize_canvas_fill', cmd('resize_canvas', {'image_index': 0, 'width': 140, 'height': 140, 'anchor': 'top-left', 'fill': '#0000ff'}))
+_layers = cmd('list_layers', {'image_index': 0}).get('results', {}).get('layers', [])
+chk('resize_canvas_keeps_layers', len(_layers) == _count + 1 and _layers[-1].get('name') == 'Canvas fill',
+    [lyr.get('name') for lyr in _layers])
+_corner = cmd('get_pixel_color', {'image_index': 0, 'x': 135, 'y': 135}).get('results', {}).get('color_hex')
+chk('resize_canvas_fills_new_area', _corner == '#0000ff', _corner)
+chk('list_layers_readable', all(not str(lyr.get('blend_mode')).isdigit() and len(lyr.get('offsets', [])) == 2 for lyr in _layers),
+    _layers[:1])
+
+t('reg_set_colors', cmd('set_colors', {'foreground': '#112233', 'background': '#445566'}))
+t('reg_drop_shadow', cmd('apply_drop_shadow', {'image_index': 0, 'color': '#ff00ff', 'blur_radius': 0}))
+_ctx = cmd('get_context_state').get('results', {})
+chk('drop_shadow_keeps_colors', _ctx.get('foreground_color', {}).get('hex') == '#112233'
+    and _ctx.get('background_color', {}).get('hex') == '#445566', _ctx.get('foreground_color'))
+
+cmd('select_rectangle', {'image_index': 0, 'x': 10, 'y': 10, 'width': 30, 'height': 30})
+t('reg_fill_rectangle', cmd('fill_rectangle', {'image_index': 0, 'x': 60, 'y': 60, 'width': 10, 'height': 10, 'color': '#00ff00'}))
+_sel = cmd('get_selection_bounds', {'image_index': 0}).get('results', {})
+chk('fill_rectangle_keeps_selection', _sel.get('has_selection') is True and _sel.get('x') == 10 and _sel.get('width') == 30, _sel)
+cmd('select_none', {'image_index': 0})
+
+t('reg_levels_layer', cmd('create_layer', {'image_index': 0, 'name': 'Levels', 'width': 140, 'height': 140}))
+cmd('fill_rectangle', {'image_index': 0, 'layer_name': 'Levels', 'x': 0, 'y': 0, 'width': 70, 'height': 140, 'color': '#606060'})
+cmd('fill_rectangle', {'image_index': 0, 'layer_name': 'Levels', 'x': 70, 'y': 0, 'width': 70, 'height': 140, 'color': '#a0a0a0'})
+t('reg_auto_levels', cmd('auto_levels', {'image_index': 0, 'layer_name': 'Levels'}))
+_lv = cmd('get_pixel_color', {'image_index': 0, 'layer_name': 'Levels', 'x': 10, 'y': 10, 'sample_merged': False}).get('results', {}).get('color_hex')
+chk('auto_levels_changes_pixels', _lv not in (None, '#606060'), _lv)
+
+_txt = t('reg_add_text', cmd('add_text', {'image_index': 0, 'text': 'Reg', 'x': 5, 'y': 5, 'size': 12, 'color': '#000000'}))
+_edit = t('reg_edit_text', cmd('edit_text', {'image_index': 0, 'layer_name': _txt.get('results', {}).get('layer_name'),
+                                              'size': 30, 'font': 'Serif'}))
+chk('edit_text_applies_size', _edit.get('results', {}).get('size') == 30, _edit.get('results'))
+
+_sheet = '/tmp/gimp_mcp_test_sheet.png'
+t('reg_sprite_sheet', cmd('export_sprite_sheet', {'image_index': 0, 'output_path': _sheet, 'columns': 2}))
+with open(_sheet, 'rb') if os.path.exists(_sheet) else open(os.devnull, 'rb') as _fh:
+    _png = _fh.read(26)
+chk('sprite_sheet_keeps_alpha', len(_png) == 26 and _png[25] == 6, _sheet)
+
+_warp = cmd('warp_region', {'image_index': 0, 'vectors': [{'x': 10, 'y': 10, 'dx': 5, 'dy': 0}]})
+chk('warp_region_refuses', _warp.get('status') == 'error', _warp.get('error'))
+
+t('reg_to_indexed', cmd('convert_color_mode', {'image_index': 0, 'mode': 'INDEXED', 'num_colors': 32}))
+chk('converted_to_indexed', 'Indexed' in json.dumps(cmd('get_image_metadata', {'image_index': 0}).get('results', {})), '')
+t('reg_back_to_rgb', cmd('convert_color_mode', {'image_index': 0, 'mode': 'RGB'}))
 
 print()
 print(f"=== TOTAL: {passed}/{passed+failed} PASSED ===")

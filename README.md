@@ -248,7 +248,7 @@ The server provides 80 tools. Each tool's own description, which the assistant s
 | `apply_emboss` | Emboss |
 | `apply_vignette` | Darken the edges |
 | `apply_drop_shadow` | Soft drop shadow below a layer |
-| `warp_region` | Push pixels in a direction, like the Warp Transform tool |
+| `warp_region` | Disabled: on GIMP 3.2 it erased the layer instead of warping, so it now returns an error |
 
 ### Transforms
 | Tool | What it does |
