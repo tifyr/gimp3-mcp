@@ -2053,12 +2053,15 @@ def gradient_fill(
 ) -> dict:
     """Fill a layer or selection with a gradient.
 
+    With an active selection, only the selected part of the layer is filled.
+
     Parameters:
     - color1: Start color as hex "#rrggbb" or a basic name (black, white, gray, silver, red, maroon, yellow,
       olive, lime, green, aqua, teal, blue, navy, fuchsia, purple); default "black"
     - color2: End color, same formats; default "white"
-    - x1, y1: Gradient start point (default top-left 0,0)
-    - x2, y2: Gradient end point (defaults to bottom-right of image)
+    - x1, y1: Gradient start point in image pixels (default 0, 0)
+    - x2, y2: Gradient end point in image pixels (default: the image's bottom-right corner);
+      must differ from the start point
     - gradient_type: "linear" (default) or "radial"
     - layer_name: Target layer; defaults to active layer
     - image_index: Target image index (default 0)

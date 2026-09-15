@@ -2955,60 +2955,52 @@ class MCPPlugin(Gimp.PlugIn):
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
     def _gradient_fill(self, params):
-        """Fill with a gradient using GEGL (gimp-blend was removed in GIMP 3)."""
+        """Fill a layer, or the selection on it, with GIMP's own gradient fill.
+
+        The previous hand-built GEGL graph set properties GEGL does not have
+        (x0/y0/x1/y1 instead of start-x/start-y/end-x/end-y) inside a swallowed
+        try block, so it reported success without drawing the gradient.
+        """
         try:
-            from gi.repository import Gegl
             image_index   = int(params.get("image_index", 0))
             layer_name    = params.get("layer_name", None)
-            color1        = params.get("color1", "black")
-            color2        = params.get("color2", "white")
             gradient_type = self._choice(params.get("gradient_type", "linear"),
-                                         {"linear": "linear", "radial": "radial"}, "gradient_type")
-            start_color   = self._parse_color(color1, "color1")
-            end_color     = self._parse_color(color2, "color2")
+                                         {"linear": Gimp.GradientType.LINEAR, "radial": Gimp.GradientType.RADIAL},
+                                         "gradient_type")
+            start_color   = self._parse_color(params.get("color1", "black"), "color1")
+            end_color     = self._parse_color(params.get("color2", "white"), "color2")
             image    = self._get_image(image_index)
             drawable = self._resolve_layer(image, layer_name, None)
-            w = image.get_width()
-            h = image.get_height()
-            x1 = float(params.get("x1") or params.get("start_x") or 0)
-            y1 = float(params.get("y1") or params.get("start_y") or 0)
-            x2 = float(params.get("x2") or params.get("end_x") or w)
-            y2 = float(params.get("y2") or params.get("end_y") or h)
 
+            def coord(names, default):
+                # An explicit 0 is a real coordinate, so test for None rather than truthiness.
+                for name in names:
+                    if params.get(name) is not None:
+                        return float(params[name])
+                return float(default)
+
+            x1 = coord(("x1", "start_x"), 0)
+            y1 = coord(("y1", "start_y"), 0)
+            x2 = coord(("x2", "end_x"), image.get_width())
+            y2 = coord(("y2", "end_y"), image.get_height())
+            if (x1, y1) == (x2, y2):
+                raise ValueError("The gradient's start and end points must differ")
+
+            call = self._call_checked
             image.undo_group_start()
             Gimp.context_push()
             try:
-                Gimp.context_set_foreground(start_color)
-                Gimp.context_set_background(end_color)
-
-                Gegl.init(None)
-                shadow_buf = drawable.get_shadow_buffer()
-                graph = Gegl.Node()
-
-                op_name = "gegl:radial-gradient" if gradient_type == "radial" else "gegl:linear-gradient"
-                grad_node = graph.create_child(op_name)
-                try:
-                    grad_node.set_property("start-color", start_color)
-                    grad_node.set_property("end-color",   end_color)
-                except Exception:
-                    pass
-                if w > 0 and h > 0:
-                    try:
-                        grad_node.set_property("x0", x1 / w)
-                        grad_node.set_property("y0", y1 / h)
-                        grad_node.set_property("x1", x2 / w)
-                        grad_node.set_property("y1", y2 / h)
-                    except Exception:
-                        pass
-
-                out_node = graph.create_child("gegl:write-buffer")
-                out_node.set_property("buffer", shadow_buf)
-                grad_node.link(out_node)
-                out_node.process()
-
-                shadow_buf.flush()
-                drawable.merge_shadow(True)
-                drawable.update(0, 0, w, h)
+                call(Gimp.context_set_foreground, start_color)
+                call(Gimp.context_set_background, end_color)
+                call(Gimp.context_set_gradient_fg_bg_rgb)
+                call(Gimp.context_set_gradient_repeat_mode, Gimp.RepeatMode.NONE)
+                call(Gimp.context_set_gradient_reverse, False)
+                call(Gimp.context_set_opacity, 100.0)
+                call(Gimp.context_set_paint_mode, Gimp.LayerMode.NORMAL)
+                # edit_gradient_fill takes layer coordinates; the tool's x/y are image coordinates.
+                _ok, off_x, off_y = drawable.get_offsets()
+                call(drawable.edit_gradient_fill, gradient_type, 0.0, False, 1, 0.0, True,
+                     x1 - off_x, y1 - off_y, x2 - off_x, y2 - off_y)
             finally:
                 Gimp.context_pop()
                 image.undo_group_end()
