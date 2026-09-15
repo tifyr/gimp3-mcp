@@ -9,9 +9,6 @@ GIMP MCP lets an AI assistant work in a running GIMP 3.2. You describe what you 
 
 It has two parts: a GIMP plugin that runs inside GIMP, and an [MCP](https://modelcontextprotocol.io) server that your AI client (Claude Desktop, Claude Code, or any other MCP client) starts. Together they give the assistant 80 tools, from brush strokes and color adjustments to layers, text, and batch export.
 
-![GIMP MCP in action: an AI agent driving GIMP through natural language](docs/mcpInAction.gif)
-
-Full demo with audio: [docs/demo.mp4](https://github.com/maorcc/gimp-mcp/raw/main/docs/demo.mp4)
 
 ---
 
@@ -345,10 +342,6 @@ These scripts talk to the plugin directly, without an AI client. Start the plugi
 | [`bg_remove_iterative.py`](bg_remove_iterative.py) | Remove a background in repeated passes, checking snapshots between them |
 | [`agent_edit_demo.py`](agent_edit_demo.py) | Open, remove the background, warp the mouth into a smile, check snapshots, export |
 
-<img src="gimp-screenshot1.png" alt="A face and a sheep drawn in GIMP through GIMP MCP" width="400">
-
-*"Draw me a face and a sheep", drawn entirely through GIMP MCP.*
-
 ---
 
 ## Troubleshooting
@@ -397,7 +390,6 @@ python tests/test_add_text_metadata.py
 
 After changing `gimp-mcp-plugin.py`, copy it into GIMP's `plug-ins` folder and restart GIMP. After changing `gimp_mcp_server.py`, restart your AI client.
 
-Contributions are welcome: open an issue or a pull request.
 
 ---
 
