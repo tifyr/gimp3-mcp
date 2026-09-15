@@ -25,6 +25,7 @@ import os
 import platform
 import signal
 import math
+import contextlib
 
 # Constants for configuration and thresholds
 LARGE_SCALING_THRESHOLD = 4.0  # Warn if scaling ratio exceeds this value
@@ -50,21 +51,69 @@ IMAGE_DISPLAY_PARASITE = "gimp-mcp-display"  # ids of windows this plugin opened
 # The only color names Gegl.Color.new() parses; every other name silently becomes translucent cyan.
 BASIC_COLOR_NAMES = ("black", "white", "gray", "silver", "red", "maroon", "yellow", "olive",
                      "lime", "green", "aqua", "teal", "blue", "navy", "fuchsia", "purple")
+BLEND_MODES = {  # names set_layer_properties accepts; list_layers and get_context_state report them
+    "NORMAL":      Gimp.LayerMode.NORMAL,
+    "MULTIPLY":    Gimp.LayerMode.MULTIPLY,
+    "SCREEN":      Gimp.LayerMode.SCREEN,
+    "OVERLAY":     Gimp.LayerMode.OVERLAY,
+    "DARKEN":      Gimp.LayerMode.DARKEN_ONLY,
+    "LIGHTEN":     Gimp.LayerMode.LIGHTEN_ONLY,
+    "DODGE":       Gimp.LayerMode.DODGE,
+    "BURN":        Gimp.LayerMode.BURN,
+    "HARD_LIGHT":  Gimp.LayerMode.HARDLIGHT,
+    "SOFT_LIGHT":  Gimp.LayerMode.SOFTLIGHT,
+    "DIFFERENCE":  Gimp.LayerMode.DIFFERENCE,
+    "HUE":         Gimp.LayerMode.HSV_HUE,
+    "SATURATION":  Gimp.LayerMode.HSV_SATURATION,
+    "COLOR":       Gimp.LayerMode.HSL_COLOR,
+    "LUMINOSITY":  Gimp.LayerMode.HSV_VALUE,
+    "DISSOLVE":    Gimp.LayerMode.DISSOLVE,
+}
 
 
 def N_(message): return message
 def _(message): return GLib.dgettext(None, message)
 
 
+class _ThreadStdout:
+    """sys.stdout that sends print() output from a thread running call_api code to that call's buffer.
+
+    Replacing sys.stdout with the buffer also captured what the socket threads printed
+    meanwhile (such as "Connected to client: ..."), and that ended up in call_api results.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.local = threading.local()
+
+    def _target(self):
+        buffer = getattr(self.local, "buffer", None)
+        return self._stream if buffer is None else buffer
+
+    def write(self, text):
+        target = self._target()
+        return len(text) if target is None else target.write(text)
+
+    def flush(self):
+        target = self._target()
+        if target is not None:
+            target.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def exec_and_get_results(command, context):
+    stdout = sys.stdout
+    if not isinstance(stdout, _ThreadStdout):
+        stdout = sys.stdout = _ThreadStdout(stdout)
     buffer = io.StringIO()
-    original_stdout = sys.stdout
-    sys.stdout = buffer
+    stdout.local.buffer = buffer
     try:
         exec(command, context)
     finally:
-        # Restore even when the command raises, so later output isn't swallowed.
-        sys.stdout = original_stdout
+        # Stop capturing even when the command raises, so later output isn't swallowed.
+        stdout.local.buffer = None
     return buffer.getvalue()
 
 
@@ -727,6 +776,8 @@ class MCPPlugin(Gimp.PlugIn):
                     
                     result = export_proc.run(export_config)
                     print(f"Export result: {result}")
+                    if result.index(0) != Gimp.PDBStatusType.SUCCESS:
+                        raise RuntimeError(f"PNG export failed: {Gimp.get_pdb().get_last_error()}")
                     
                 except Exception as export_error:
                     print(f"Export error: {export_error}")
@@ -764,7 +815,9 @@ class MCPPlugin(Gimp.PlugIn):
                 # Read the exported file and encode as base64
                 with open(temp_path, 'rb') as f:
                     image_data = f.read()
-                    encoded_image = base64.b64encode(image_data).decode('utf-8')
+                if not image_data:
+                    return {"status": "error", "error": "Exporting the snapshot produced an empty file"}
+                encoded_image = base64.b64encode(image_data).decode('utf-8')
                 
                 # Get final image metadata
                 final_width = final_image.get_width()
@@ -1305,30 +1358,16 @@ class MCPPlugin(Gimp.PlugIn):
                 fg_color = Gimp.context_get_foreground()
                 bg_color = Gimp.context_get_background()
 
-                # Convert colors to RGB values
-                context_state["foreground_color"] = {
-                    "color_object": str(fg_color),
-                    "description": "Current foreground color"
-                }
-                context_state["background_color"] = {
-                    "color_object": str(bg_color),
-                    "description": "Current background color"
-                }
-
-                # Try to get RGB values if possible
-                try:
-                    if hasattr(fg_color, 'get_rgba'):
-                        rgba = fg_color.get_rgba()
-                        context_state["foreground_color"]["rgba"] = list(rgba) if rgba else None
-                except Exception as color_error:
-                    context_state["foreground_color"]["rgba_error"] = str(color_error)
-
-                try:
-                    if hasattr(bg_color, 'get_rgba'):
-                        rgba = bg_color.get_rgba()
-                        context_state["background_color"]["rgba"] = list(rgba) if rgba else None
-                except Exception as color_error:
-                    context_state["background_color"]["rgba_error"] = str(color_error)
+                # get_rgba() is linear light; report sRGB hex so values match the colors tools accept.
+                for key, color, label in (("foreground_color", fg_color, "Current foreground color"),
+                                          ("background_color", bg_color, "Current background color")):
+                    srgb = color.get_rgba_with_space(None)
+                    rgb = tuple(max(0, min(255, round(v * 255))) for v in (srgb.red, srgb.green, srgb.blue))
+                    context_state[key] = {
+                        "hex": "#%02x%02x%02x" % rgb,
+                        "alpha": round(srgb.alpha, 4),
+                        "description": label,
+                    }
 
             except Exception as color_err:
                 context_state["colors_error"] = str(color_err)
@@ -1358,7 +1397,7 @@ class MCPPlugin(Gimp.PlugIn):
             try:
                 paint_mode = Gimp.context_get_paint_mode()
                 context_state["paint_mode"] = {
-                    "value": str(paint_mode),
+                    "value": self._blend_mode_name(paint_mode),
                     "description": "Current paint/blend mode"
                 }
             except Exception as mode_err:
@@ -1367,10 +1406,10 @@ class MCPPlugin(Gimp.PlugIn):
             # Get feather setting (if available)
             try:
                 feather = Gimp.context_get_feather()
-                feather_radius = Gimp.context_get_feather_radius()
+                _ok, radius_x, radius_y = Gimp.context_get_feather_radius()
                 context_state["feather"] = {
                     "enabled": feather,
-                    "radius": feather_radius,
+                    "radius": [radius_x, radius_y],
                     "description": "Selection feathering state"
                 }
             except Exception:
@@ -1470,9 +1509,12 @@ class MCPPlugin(Gimp.PlugIn):
                 layer.add_alpha()
                 Gimp.Drawable.edit_fill(layer, Gimp.FillType.TRANSPARENT)
             else:
-                bg_color = fill_color
-                Gimp.context_set_background(bg_color)
-                Gimp.Drawable.edit_fill(layer, Gimp.FillType.BACKGROUND)
+                Gimp.context_push()  # keep the user's background color
+                try:
+                    Gimp.context_set_background(fill_color)
+                    Gimp.Drawable.edit_fill(layer, Gimp.FillType.BACKGROUND)
+                finally:
+                    Gimp.context_pop()
 
             self._remember_display(image, Gimp.Display.new(image))
             Gimp.displays_flush()
@@ -1541,6 +1583,33 @@ class MCPPlugin(Gimp.PlugIn):
             if name.lower() == key:
                 return result
         raise ValueError(f"{label} must be one of {', '.join(choices)} (got {value!r})")
+
+    @staticmethod
+    def _check_range(value, low, high, label):
+        """Return value, or raise an error naming label if it is outside low..high."""
+        if not low <= value <= high:
+            raise ValueError(f"{label} must be between {low:g} and {high:g} (got {value:g})")
+        return value
+
+    @staticmethod
+    def _check_ok(ok, what):
+        """Raise GIMP's last error when a libgimp call returned False instead of doing its work."""
+        if not ok:
+            raise RuntimeError(f"{what} failed: {Gimp.get_pdb().get_last_error()}")
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _kept_selection(image):
+        """Put back the user's selection after a tool selects a shape to fill or stroke it."""
+        saved = None if Gimp.Selection.is_empty(image) else Gimp.Selection.save(image)
+        try:
+            yield
+        finally:
+            if saved is None:
+                Gimp.Selection.none(image)
+            else:
+                image.get_selection().combine_masks(saved, Gimp.ChannelOps.REPLACE, 0, 0)
+                image.remove_channel(saved)
 
     @staticmethod
     def _parse_color(value, label):
@@ -1719,13 +1788,11 @@ class MCPPlugin(Gimp.PlugIn):
             gio_file = Gio.File.new_for_path(file_path)
             pdb = Gimp.get_pdb()
             proc = pdb.lookup_procedure("gimp-xcf-save")
-            if proc:
-                cfg = proc.create_config()
-                cfg.set_property("image", image)
-                cfg.set_property("file", gio_file)
-                proc.run(cfg)
-            else:
-                Gimp.file_overwrite(Gimp.RunMode.NONINTERACTIVE, image, gio_file)
+            cfg = proc.create_config()
+            cfg.set_property("image", image)
+            cfg.set_property("file", gio_file)
+            if proc.run(cfg).index(0) != Gimp.PDBStatusType.SUCCESS:
+                raise RuntimeError(f"Saving {file_path} failed: {pdb.get_last_error()}")
             return {"status": "success", "results": {"status": "success", "file_path": file_path}}
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
@@ -1810,25 +1877,8 @@ class MCPPlugin(Gimp.PlugIn):
             drawable = self._resolve_layer(image, layer_name, None)
             image.undo_group_start()
             try:
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-levels-stretch")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable", drawable)
-                    proc.run(cfg)
-                else:
-                    proc2 = pdb.lookup_procedure("gimp-drawable-levels")
-                    if proc2:
-                        cfg2 = proc2.create_config()
-                        cfg2.set_property("drawable", drawable)
-                        cfg2.set_property("channel", Gimp.HistogramChannel.VALUE)
-                        cfg2.set_property("low-input", 0.0)
-                        cfg2.set_property("high-input", 1.0)
-                        cfg2.set_property("clamp-input", True)
-                        cfg2.set_property("gamma", 1.0)
-                        cfg2.set_property("low-output", 0.0)
-                        cfg2.set_property("high-output", 1.0)
-                        proc2.run(cfg2)
+                # GIMP 3 has no gimp-levels-stretch; the old fallback applied identity levels and changed nothing.
+                self._check_ok(drawable.levels_stretch(), "Auto levels")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -1873,27 +1923,15 @@ class MCPPlugin(Gimp.PlugIn):
                     control_pts = list(custom_pts)
             else:
                 control_pts = self._choice(preset, PRESETS, "preset")
+            if len(control_pts) < 4 or len(control_pts) % 2:
+                raise ValueError("points needs at least two [input, output] pairs")
+            for p in control_pts:
+                self._check_range(float(p), 0, 255, "curve point values")
 
             image.undo_group_start()
             try:
                 pts_normalized = [p / 255.0 for p in control_pts]
-                # set_property can't auto-convert Python list to GimpDoubleArray.
-                # Try calling curves_spline as a direct method on the drawable
-                # (GI exposes gimp-drawable-curves-spline as drawable.curves_spline).
-                try:
-                    drawable.curves_spline(channel, pts_normalized)
-                except Exception:
-                    # Fallback: use array.array typed buffer which GI may accept
-                    import array as _arr
-                    typed = _arr.array('d', pts_normalized)
-                    pdb = Gimp.get_pdb()
-                    proc = pdb.lookup_procedure("gimp-drawable-curves-spline")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("drawable", drawable)
-                        cfg.set_property("channel",  channel)
-                        cfg.set_property("points",   typed)
-                        proc.run(cfg)
+                self._check_ok(drawable.curves_spline(channel, pts_normalized), "Curves")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -1906,20 +1944,13 @@ class MCPPlugin(Gimp.PlugIn):
         try:
             image_index = int(params.get("image_index", 0))
             layer_name  = params.get("layer_name", None)
-            brightness  = float(params.get("brightness", 0))
-            contrast    = float(params.get("contrast", 0))
+            brightness  = self._check_range(float(params.get("brightness", 0)), -127, 127, "brightness")
+            contrast    = self._check_range(float(params.get("contrast", 0)), -127, 127, "contrast")
             image    = self._get_image(image_index)
             drawable = self._resolve_layer(image, layer_name, None)
             image.undo_group_start()
             try:
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-drawable-brightness-contrast")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable", drawable)
-                    cfg.set_property("brightness", brightness / 127.0)
-                    cfg.set_property("contrast",   contrast   / 127.0)
-                    proc.run(cfg)
+                self._check_ok(drawable.brightness_contrast(brightness / 127.0, contrast / 127.0), "Brightness-contrast")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -1941,26 +1972,16 @@ class MCPPlugin(Gimp.PlugIn):
             }
             image_index  = int(params.get("image_index", 0))
             layer_name   = params.get("layer_name", None)
-            hue          = float(params.get("hue", 0))
-            saturation   = float(params.get("saturation", 0))
-            lightness    = float(params.get("lightness", 0))
+            hue          = self._check_range(float(params.get("hue", 0)), -180, 180, "hue")
+            saturation   = self._check_range(float(params.get("saturation", 0)), -100, 100, "saturation")
+            lightness    = self._check_range(float(params.get("lightness", 0)), -100, 100, "lightness")
             color_range  = params.get("color_range", "all")
             image    = self._get_image(image_index)
             drawable = self._resolve_layer(image, layer_name, None)
             hue_range = self._choice(color_range, HUE_RANGE_MAP, "color_range")
             image.undo_group_start()
             try:
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-drawable-hue-saturation")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable", drawable)
-                    cfg.set_property("hue-range", hue_range)
-                    cfg.set_property("hue-offset", hue)
-                    cfg.set_property("lightness",  lightness)
-                    cfg.set_property("saturation", saturation)
-                    cfg.set_property("overlap", 0.0)
-                    proc.run(cfg)
+                self._check_ok(drawable.hue_saturation(hue_range, hue, lightness, saturation, 0.0), "Hue-saturation")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -1971,34 +1992,24 @@ class MCPPlugin(Gimp.PlugIn):
     def _adjust_color_balance(self, params):
         """Adjust color balance for shadows/midtones/highlights."""
         try:
-            # GIMP 3.2 uses integer constants for color-range (0=shadows,1=midtones,2=highlights)
             RANGE_MAP = {
-                "shadows":    0,
-                "midtones":   1,
-                "highlights": 2,
+                "shadows":    Gimp.TransferMode.SHADOWS,
+                "midtones":   Gimp.TransferMode.MIDTONES,
+                "highlights": Gimp.TransferMode.HIGHLIGHTS,
             }
             image_index    = int(params.get("image_index", 0))
             layer_name     = params.get("layer_name", None)
-            cyan_red       = float(params.get("cyan_red", 0))
-            magenta_green  = float(params.get("magenta_green", 0))
-            yellow_blue    = float(params.get("yellow_blue", 0))
+            cyan_red       = self._check_range(float(params.get("cyan_red", 0)), -100, 100, "cyan_red")
+            magenta_green  = self._check_range(float(params.get("magenta_green", 0)), -100, 100, "magenta_green")
+            yellow_blue    = self._check_range(float(params.get("yellow_blue", 0)), -100, 100, "yellow_blue")
             range_str      = params.get("range", "midtones")
             image    = self._get_image(image_index)
             drawable = self._resolve_layer(image, layer_name, None)
             color_range = self._choice(range_str, RANGE_MAP, "range")
             image.undo_group_start()
             try:
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-drawable-color-balance")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable",      drawable)
-                    cfg.set_property("transfer-mode", color_range)
-                    cfg.set_property("cyan-red",      cyan_red)
-                    cfg.set_property("magenta-green", magenta_green)
-                    cfg.set_property("yellow-blue",   yellow_blue)
-                    cfg.set_property("preserve-lum",  True)
-                    proc.run(cfg)
+                self._check_ok(drawable.color_balance(color_range, True, cyan_red, magenta_green, yellow_blue),
+                               "Color balance")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -2091,13 +2102,7 @@ class MCPPlugin(Gimp.PlugIn):
             mode = self._choice(mode_str, MODE_MAP, "mode")
             image.undo_group_start()
             try:
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-drawable-desaturate")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable", drawable)
-                    cfg.set_property("desaturate-mode", mode)
-                    proc.run(cfg)
+                self._check_ok(drawable.desaturate(mode), "Desaturate")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -2114,13 +2119,7 @@ class MCPPlugin(Gimp.PlugIn):
             drawable = self._resolve_layer(image, layer_name, None)
             image.undo_group_start()
             try:
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-drawable-invert")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable", drawable)
-                    cfg.set_property("linear", False)
-                    proc.run(cfg)
+                self._check_ok(drawable.invert(False), "Invert")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -2199,12 +2198,7 @@ class MCPPlugin(Gimp.PlugIn):
             image.undo_group_start()
             try:
                 if autocrop:
-                    pdb = Gimp.get_pdb()
-                    proc = pdb.lookup_procedure("gimp-image-autocrop")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("image", image)
-                        proc.run(cfg)
+                    self._check_ok(image.autocrop(None), "Autocrop")
                 else:
                     _ok, non_empty, x1, y1, x2, y2 = Gimp.Selection.bounds(image)
                     if non_empty:
@@ -2314,17 +2308,33 @@ class MCPPlugin(Gimp.PlugIn):
             image.undo_group_start()
             try:
                 image.resize(new_w, new_h, off_x, off_y)
-                if fill_color is not None:
+                fill_layer = None
+                covered = off_x <= 0 and off_y <= 0 and off_x + src_w >= new_w and off_y + src_h >= new_h
+                if fill_color is not None and not covered:
+                    # Paint the new areas on a bottom layer of their own; flattening merged every layer into one.
+                    layer_type = {Gimp.ImageBaseType.RGB:  Gimp.ImageType.RGBA_IMAGE,
+                                  Gimp.ImageBaseType.GRAY: Gimp.ImageType.GRAYA_IMAGE}.get(
+                                      image.get_base_type(), Gimp.ImageType.INDEXEDA_IMAGE)
+                    selected = image.get_selected_layers()
+                    fill_layer = Gimp.Layer.new(image, "Canvas fill", new_w, new_h, layer_type, 100, Gimp.LayerMode.NORMAL)
+                    image.insert_layer(fill_layer, None, len(image.get_layers()))
+                    fill_layer.fill(Gimp.FillType.TRANSPARENT)
+                    image.set_selected_layers(selected)
                     Gimp.context_push()
                     try:
-                        Gimp.context_set_background(fill_color)
-                        image.flatten()
+                        Gimp.context_set_feather(False)
+                        Gimp.context_set_foreground(fill_color)
+                        with self._kept_selection(image):
+                            image.select_rectangle(Gimp.ChannelOps.REPLACE, 0, 0, new_w, new_h)
+                            image.select_rectangle(Gimp.ChannelOps.SUBTRACT, off_x, off_y, src_w, src_h)
+                            fill_layer.edit_fill(Gimp.FillType.FOREGROUND)
                     finally:
                         Gimp.context_pop()
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
-            return {"status": "success", "results": {"status": "success", "width": new_w, "height": new_h, "offset_x": off_x, "offset_y": off_y}}
+            return {"status": "success", "results": {"status": "success", "width": new_w, "height": new_h, "offset_x": off_x, "offset_y": off_y,
+                                                     "fill_layer": fill_layer.get_name() if fill_layer else None}}
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
@@ -2472,25 +2482,12 @@ class MCPPlugin(Gimp.PlugIn):
 
     def _blend_mode_from_string(self, mode_str):
         """Map blend mode name string to Gimp.LayerMode."""
-        MODE_MAP = {
-            "NORMAL":      Gimp.LayerMode.NORMAL,
-            "MULTIPLY":    Gimp.LayerMode.MULTIPLY,
-            "SCREEN":      Gimp.LayerMode.SCREEN,
-            "OVERLAY":     Gimp.LayerMode.OVERLAY,
-            "DARKEN":      Gimp.LayerMode.DARKEN_ONLY,
-            "LIGHTEN":     Gimp.LayerMode.LIGHTEN_ONLY,
-            "DODGE":       Gimp.LayerMode.DODGE,
-            "BURN":        Gimp.LayerMode.BURN,
-            "HARD_LIGHT":  Gimp.LayerMode.HARDLIGHT,
-            "SOFT_LIGHT":  Gimp.LayerMode.SOFTLIGHT,
-            "DIFFERENCE":  Gimp.LayerMode.DIFFERENCE,
-            "HUE":         Gimp.LayerMode.HSV_HUE,
-            "SATURATION":  Gimp.LayerMode.HSV_SATURATION,
-            "COLOR":       Gimp.LayerMode.HSL_COLOR,
-            "LUMINOSITY":  Gimp.LayerMode.HSV_VALUE,
-            "DISSOLVE":    Gimp.LayerMode.DISSOLVE,
-        }
-        return self._choice(mode_str, MODE_MAP, "blend mode")
+        return self._choice(mode_str, BLEND_MODES, "blend mode")
+
+    @staticmethod
+    def _blend_mode_name(mode):
+        """Name for a Gimp.LayerMode that set_layer_properties accepts, else GIMP's own enum name."""
+        return next((name for name, value in BLEND_MODES.items() if value == mode), mode.name)
 
     def _create_layer(self, params):
         """Create and insert a new layer."""
@@ -2690,12 +2687,12 @@ class MCPPlugin(Gimp.PlugIn):
                         "id":         layer.get_id(),
                         "visible":    layer.get_visible(),
                         "opacity":    layer.get_opacity(),
-                        "blend_mode": str(layer.get_mode()),
+                        "blend_mode": self._blend_mode_name(layer.get_mode()),
                         "width":      layer.get_width(),
                         "height":     layer.get_height(),
                         "has_alpha":  layer.has_alpha(),
                         "active":     layer.get_id() in active_ids,
-                        "offsets":    list(layer.get_offsets()),
+                        "offsets":    list(layer.get_offsets())[1:],  # drop the leading success flag
                     })
                 except Exception as ex:
                     layer_list.append({"index": i, "error": str(ex)})
@@ -2719,10 +2716,10 @@ class MCPPlugin(Gimp.PlugIn):
             image.undo_group_start()
             Gimp.context_push()
             try:
-                Gimp.Selection.all(image)
-                Gimp.context_set_foreground(fill_color)
-                Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
-                Gimp.Selection.none(image)
+                with self._kept_selection(image):
+                    Gimp.Selection.all(image)
+                    Gimp.context_set_foreground(fill_color)
+                    Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
             finally:
                 Gimp.context_pop()
                 image.undo_group_end()
@@ -2844,14 +2841,9 @@ class MCPPlugin(Gimp.PlugIn):
                 Gimp.context_set_stroke_method(Gimp.StrokeMethod.LINE)
                 Gimp.context_set_line_width(line_width)
                 Gimp.context_set_opacity(100.0)
-                image.select_rectangle(Gimp.ChannelOps.REPLACE, x, y, width, height)
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-drawable-edit-stroke-selection")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable", drawable)
-                    proc.run(cfg)
-                Gimp.Selection.none(image)
+                with self._kept_selection(image):
+                    image.select_rectangle(Gimp.ChannelOps.REPLACE, x, y, width, height)
+                    self._check_ok(drawable.edit_stroke_selection(), "Stroking the rectangle")
             finally:
                 Gimp.context_pop()
                 image.undo_group_end()
@@ -2882,14 +2874,9 @@ class MCPPlugin(Gimp.PlugIn):
                 Gimp.context_set_stroke_method(Gimp.StrokeMethod.LINE)
                 Gimp.context_set_line_width(line_width)
                 Gimp.context_set_opacity(100.0)
-                image.select_ellipse(Gimp.ChannelOps.REPLACE, x, y, width, height)
-                pdb = Gimp.get_pdb()
-                proc = pdb.lookup_procedure("gimp-drawable-edit-stroke-selection")
-                if proc:
-                    cfg = proc.create_config()
-                    cfg.set_property("drawable", drawable)
-                    proc.run(cfg)
-                Gimp.Selection.none(image)
+                with self._kept_selection(image):
+                    image.select_ellipse(Gimp.ChannelOps.REPLACE, x, y, width, height)
+                    self._check_ok(drawable.edit_stroke_selection(), "Stroking the ellipse")
             finally:
                 Gimp.context_pop()
                 image.undo_group_end()
@@ -2914,10 +2901,10 @@ class MCPPlugin(Gimp.PlugIn):
             image.undo_group_start()
             Gimp.context_push()
             try:
-                image.select_rectangle(Gimp.ChannelOps.REPLACE, x, y, width, height)
-                Gimp.context_set_foreground(fill_color)
-                Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
-                Gimp.Selection.none(image)
+                with self._kept_selection(image):
+                    image.select_rectangle(Gimp.ChannelOps.REPLACE, x, y, width, height)
+                    Gimp.context_set_foreground(fill_color)
+                    Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
             finally:
                 Gimp.context_pop()
                 image.undo_group_end()
@@ -2942,10 +2929,10 @@ class MCPPlugin(Gimp.PlugIn):
             image.undo_group_start()
             Gimp.context_push()
             try:
-                image.select_ellipse(Gimp.ChannelOps.REPLACE, x, y, width, height)
-                Gimp.context_set_foreground(fill_color)
-                Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
-                Gimp.Selection.none(image)
+                with self._kept_selection(image):
+                    image.select_ellipse(Gimp.ChannelOps.REPLACE, x, y, width, height)
+                    Gimp.context_set_foreground(fill_color)
+                    Gimp.Drawable.edit_fill(drawable, Gimp.FillType.FOREGROUND)
             finally:
                 Gimp.context_pop()
                 image.undo_group_end()
@@ -3533,142 +3520,53 @@ class MCPPlugin(Gimp.PlugIn):
             new_color   = params.get("color", None)
             image    = self._get_image(image_index)
             layer    = self._resolve_layer(image, layer_name, None)
+            if not layer.is_text_layer():
+                raise ValueError(f"Layer '{layer.get_name()}' is not a text layer")
+            layer    = Gimp.TextLayer.get_by_id(layer.get_id())
+            # Check every value before changing anything, so a bad one leaves the layer as it was.
             color    = self._parse_color(new_color, "color") if new_color is not None else None
-            pdb      = Gimp.get_pdb()
+            font     = None
+            if new_font is not None:
+                font = self._resolve_font(str(new_font))  # the PDB takes a Gimp.Font, not a name
+                if font is None:
+                    raise ValueError(f"No font matches {new_font!r}; list_fonts shows the names")
+            if new_size is not None:
+                new_size = float(new_size)
+                if new_size <= 0:
+                    raise ValueError(f"size must be positive (got {new_size:g})")
             image.undo_group_start()
             try:
                 if new_text is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-text")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer", layer)
-                        cfg.set_property("text",  new_text)
-                        proc.run(cfg)
-                if new_font is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-font")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer", layer)
-                        cfg.set_property("font",  new_font)
-                        proc.run(cfg)
+                    self._check_ok(layer.set_text(str(new_text)), "Setting the text")
+                if font is not None:
+                    self._check_ok(layer.set_font(font), "Setting the font")
                 if new_size is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-font-size")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer",     layer)
-                        cfg.set_property("font-size", float(new_size))
-                        cfg.set_property("unit",      Gimp.Unit.PIXEL)
-                        proc.run(cfg)
+                    self._check_ok(layer.set_font_size(new_size, Gimp.Unit.pixel()), "Setting the font size")
                 if color is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-color")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer", layer)
-                        cfg.set_property("color", color)
-                        proc.run(cfg)
+                    self._check_ok(layer.set_color(color), "Setting the color")
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
-            return {"status": "success", "results": {"status": "success"}}
+            size, _unit = layer.get_font_size()
+            return {"status": "success", "results": {
+                "layer_name": layer.get_name(), "text": layer.get_text(),
+                "font": layer.get_font().get_name(), "size": size}}
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
     def _warp_region(self, params):
-        """Warp / liquify a region of pixels to deform facial features.
+        """Disabled: on GIMP 3.2 the GEGL warp graph used here erased the whole layer.
 
-        Uses plug-in-iwarp (interactive warp) to push pixels in a direction.
-        Useful for subtle expressions: turning a neutral mouth into a smile by
-        pushing corners upward, etc.
-
-        params:
-          image_index  — which image
-          layer_name   — optional layer
-          vectors      — list of warp vectors: [{x, y, dx, dy, radius, amount}]
-                         x/y: pixel coords of warp center
-                         dx/dy: push direction in pixels (positive y = down)
-                         radius: influence radius in pixels (default 40)
-                         amount: deform strength 0-1 (default 0.3)
+        The "stroke" was set from a Python list, which GEGL never stored, and the
+        empty result was merged over every pixel. A real Gegl.Path stroke changes
+        nothing, GIMP 3.2 will not create gegl:warp as a drawable filter, and
+        plug-in-iwarp no longer exists, so there is no working warp to call.
         """
-        try:
-            from gi.repository import Gegl
-            image_index = int(params.get("image_index", 0))
-            layer_name  = params.get("layer_name", None)
-            vectors     = params.get("vectors", [])
-            image    = self._get_image(image_index)
-            drawable = self._resolve_layer(image, layer_name, None)
-            pdb      = Gimp.get_pdb()
-
-            image.undo_group_start()
-            try:
-                for v in vectors:
-                    x      = float(v.get("x", 0))
-                    y      = float(v.get("y", 0))
-                    dx     = float(v.get("dx", 0))
-                    dy     = float(v.get("dy", 0))
-                    radius = float(v.get("radius", 40))
-                    amount = float(v.get("amount", 0.3))
-
-                    # Try GEGL warp operation first (GIMP 3 native approach)
-                    try:
-                        Gegl.init(None)
-                        buf        = drawable.get_buffer()
-                        shadow_buf = drawable.get_shadow_buffer()
-                        graph      = Gegl.Node()
-
-                        src = graph.create_child("gegl:buffer-source")
-                        src.set_property("buffer", buf)
-
-                        warp = graph.create_child("gegl:warp")
-                        warp.set_property("behavior",    0)        # 0 = move
-                        warp.set_property("strength",    amount)
-                        warp.set_property("size",        radius)
-                        warp.set_property("hardness",    0.5)
-                        # stamp one warp stroke at (x,y) → (x+dx, y+dy)
-                        # GEGL warp builds strokes via the "stroke" property
-                        stroke = [(x, y), (x + dx, y + dy)]
-                        warp.set_property("stroke", stroke)
-
-                        out = graph.create_child("gegl:write-buffer")
-                        out.set_property("buffer", shadow_buf)
-
-                        src.link(warp)
-                        warp.link(out)
-                        out.process()
-
-                        shadow_buf.flush()
-                        drawable.merge_shadow(True)
-                        drawable.update(
-                            max(0, int(x - radius - abs(dx))),
-                            max(0, int(y - radius - abs(dy))),
-                            int(radius * 2 + abs(dx) * 2 + 4),
-                            int(radius * 2 + abs(dy) * 2 + 4),
-                        )
-                    except Exception:
-                        # Fallback: plug-in-iwarp if GEGL warp fails
-                        proc = pdb.lookup_procedure("plug-in-iwarp")
-                        if proc:
-                            cfg = proc.create_config()
-                            try:
-                                cfg.set_property("run-mode",      Gimp.RunMode.NONINTERACTIVE)
-                                cfg.set_property("image",         image)
-                                cfg.set_property("drawable",      drawable)
-                                cfg.set_property("cursor-x",      int(x))
-                                cfg.set_property("cursor-y",      int(y))
-                                cfg.set_property("pressure",      amount)
-                                cfg.set_property("move-max-dist", int(radius))
-                                cfg.set_property("deform-type",   0)  # 0 = MOVE
-                                cfg.set_property("x",             int(x + dx))
-                                cfg.set_property("y",             int(y + dy))
-                                proc.run(cfg)
-                            except Exception:
-                                pass
-            finally:
-                image.undo_group_end()
-
-            Gimp.displays_flush()
-            return {"status": "success", "results": {"warped_vectors": len(vectors)}}
-        except Exception as e:
-            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+        return {
+            "status": "error",
+            "error": "warp_region is disabled: on GIMP 3.2 it erased the whole layer instead of warping it. "
+                     "Use GIMP's Warp Transform tool by hand instead.",
+        }
 
     def _list_fonts(self, params):
         """List available fonts."""
@@ -3727,10 +3625,14 @@ class MCPPlugin(Gimp.PlugIn):
                 image.insert_layer(shadow_layer, None, src_pos + 1)
 
                 # 2. Fill shadow layer with shadow color, preserving alpha shape
-                Gimp.context_set_foreground(shadow_color)
-                shadow_layer.set_lock_alpha(True)
-                Gimp.Drawable.edit_fill(shadow_layer, Gimp.FillType.FOREGROUND)
-                shadow_layer.set_lock_alpha(False)
+                Gimp.context_push()  # keep the user's foreground color
+                try:
+                    Gimp.context_set_foreground(shadow_color)
+                    shadow_layer.set_lock_alpha(True)
+                    Gimp.Drawable.edit_fill(shadow_layer, Gimp.FillType.FOREGROUND)
+                    shadow_layer.set_lock_alpha(False)
+                finally:
+                    Gimp.context_pop()
 
                 # 3. Set opacity and offset
                 shadow_layer.set_opacity(opacity)
@@ -3955,8 +3857,16 @@ class MCPPlugin(Gimp.PlugIn):
                         new_h, new_w = mh, max(1, int(mh * aspect))
                     dup.scale(new_w, new_h)
 
-                gio_file = dup.get_file()
-                raw_name = gio_file.get_basename().rsplit(".", 1)[0] if gio_file else "image"
+                # Name the files after the source image; a duplicate never has a file, so all exports were "image".
+                gio_file = image.get_file()
+                if gio_file:
+                    raw_name = os.path.splitext(gio_file.get_basename())[0]
+                else:
+                    # The new_canvas name, or Untitled-<id>; add the id so same-named images don't collide.
+                    raw_name = self._image_name(image)
+                    if not raw_name.endswith(f"-{image.get_id()}"):
+                        raw_name = f"{raw_name}-{image.get_id()}"
+                    raw_name = raw_name.replace(os.sep, "_")
                 jpeg_path = os.path.join(output_dir, f"{raw_name}.jpg")
                 png_path  = os.path.join(output_dir, f"{raw_name}.png")
                 jpeg_size = self._export_to_path(dup, jpeg_path, "jpeg", jpeg_quality, True)
@@ -4019,28 +3929,35 @@ class MCPPlugin(Gimp.PlugIn):
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
     def _export_sprite_sheet(self, params):
-        """Combine frames into a sprite sheet."""
+        """Combine frames into a sprite sheet PNG that keeps transparency.
+
+        Frames are copied with Layer.new_from_drawable (layers) or new_from_visible
+        (images), so no selection, clipboard or GIMP color is touched.
+        """
         try:
-            from gi.repository import Gegl
-            output_path = params.get("output_path", "")
+            output_path = str(params.get("output_path", "")).strip()
             columns     = params.get("columns", None)
             padding     = int(params.get("padding", 0))
-            source      = params.get("source", "layers").lower()
+            source      = self._choice(params.get("source", "layers"), {"layers": "layers", "images": "images"}, "source")
             image_index = int(params.get("image_index", 0))
-            import math
+            if not output_path:
+                raise ValueError("output_path is required")
+            if padding < 0:
+                raise ValueError(f"padding must be 0 or more (got {padding})")
+            if columns is not None and int(columns) < 1:
+                raise ValueError(f"columns must be at least 1 (got {columns})")
 
             if source == "images":
                 frames = Gimp.get_images()
             else:
-                src_image = self._get_image(image_index)
-                frames = src_image.get_layers()
+                frames = self._get_image(image_index).get_layers()
 
             if not frames:
                 return {"status": "error", "error": "No frames found"}
 
             # Use first frame dimensions as the cell size
-            frame_w = frames[0].get_width()  if hasattr(frames[0], 'get_width')  else frames[0].get_width()
-            frame_h = frames[0].get_height() if hasattr(frames[0], 'get_height') else frames[0].get_height()
+            frame_w = frames[0].get_width()
+            frame_h = frames[0].get_height()
             n = len(frames)
             cols = int(columns) if columns else max(1, math.ceil(math.sqrt(n)))
             rows = math.ceil(n / cols)
@@ -4048,33 +3965,30 @@ class MCPPlugin(Gimp.PlugIn):
             sheet_w = cols * frame_w + (cols - 1) * padding
             sheet_h = rows * frame_h + (rows - 1) * padding
 
-            sheet = Gimp.Image.new(sheet_w, sheet_h, Gimp.ImageBaseType.RGBA)
-            bg_layer = Gimp.Layer.new(sheet, "Background", sheet_w, sheet_h, Gimp.ImageType.RGBA_IMAGE, 100, Gimp.LayerMode.NORMAL)
-            sheet.insert_layer(bg_layer, None, 0)
-            Gimp.context_set_background(Gegl.Color.new("transparent"))
-            Gimp.Drawable.edit_fill(bg_layer, Gimp.FillType.TRANSPARENT)
-
-            for i, frame in enumerate(frames):
-                col = i % cols
-                row = i // cols
-                dest_x = col * (frame_w + padding)
-                dest_y = row * (frame_h + padding)
-                if source == "images":
-                    src_layers = frame.get_layers()
-                    if not src_layers:
-                        continue
-                    src_drawable = src_layers[0]
-                    frame.select_rectangle(Gimp.ChannelOps.REPLACE, 0, 0, frame.get_width(), frame.get_height())
-                else:
-                    src_drawable = frame
-                    frame.get_image().select_rectangle(Gimp.ChannelOps.REPLACE, 0, 0, frame_w, frame_h)
-                Gimp.edit_copy([src_drawable])
-                pasted = Gimp.edit_paste(bg_layer, True)[0]
-                pasted.set_offsets(dest_x, dest_y)
-                Gimp.floating_sel_anchor(pasted)
-
-            self._export_to_path(sheet, output_path, "png", 95, True)
-            sheet.delete()
+            # Alpha belongs to layers in GIMP 3: an RGB image with RGBA layers.
+            sheet = Gimp.Image.new(sheet_w, sheet_h, Gimp.ImageBaseType.RGB)
+            try:
+                background = Gimp.Layer.new(sheet, "Background", sheet_w, sheet_h, Gimp.ImageType.RGBA_IMAGE, 100, Gimp.LayerMode.NORMAL)
+                sheet.insert_layer(background, None, 0)
+                background.fill(Gimp.FillType.TRANSPARENT)
+                for i, frame in enumerate(frames):
+                    if source == "images":
+                        cell = Gimp.Layer.new_from_visible(frame, sheet, f"Frame {i + 1}")
+                    else:
+                        cell = Gimp.Layer.new_from_drawable(frame, sheet)
+                    sheet.insert_layer(cell, None, 0)
+                    if not cell.has_alpha():
+                        cell.add_alpha()
+                    cell.set_visible(True)
+                    cell.set_offsets(0, 0)
+                    # Crop or pad the frame to the cell. Called on Gimp.Layer because a copied text
+                    # layer is a Gimp.TextLayer, whose own resize() sets the text box size instead.
+                    self._check_ok(Gimp.Layer.resize(cell, frame_w, frame_h, 0, 0), "Fitting a frame to its cell")
+                    cell.set_offsets((i % cols) * (frame_w + padding), (i // cols) * (frame_h + padding))
+                # Not flattened: flattening drops the alpha channel.
+                self._export_to_path(sheet, output_path, "png", 95, False)
+            finally:
+                sheet.delete()
             return {
                 "status": "success",
                 "results": {
@@ -4234,32 +4148,31 @@ class MCPPlugin(Gimp.PlugIn):
         """Convert image color mode."""
         try:
             image_index = int(params.get("image_index", 0))
-            mode        = params.get("mode", "RGB").upper()
+            base_types  = {"RGB": Gimp.ImageBaseType.RGB, "RGBA": Gimp.ImageBaseType.RGB,
+                           "GRAY": Gimp.ImageBaseType.GRAY, "GRAYA": Gimp.ImageBaseType.GRAY,
+                           "INDEXED": Gimp.ImageBaseType.INDEXED}
+            mode        = str(params.get("mode", "RGB")).strip().upper()
+            target      = self._choice(mode, base_types, "mode")
             num_colors  = int(params.get("num_colors", 256))
+            if mode == "INDEXED":
+                self._check_range(num_colors, 1, 256, "num_colors")
             image = self._get_image(image_index)
             image.undo_group_start()
             try:
-                if mode in ("RGB", "RGBA"):
-                    image.convert_rgb()
-                    if mode == "RGBA":
-                        # Add alpha channel to all layers
-                        for layer in image.get_layers():
-                            if not layer.has_alpha():
-                                layer.add_alpha()
-                elif mode in ("GRAY", "GRAYA"):
-                    image.convert_grayscale()
-                    if mode == "GRAYA":
-                        for layer in image.get_layers():
-                            if not layer.has_alpha():
-                                layer.add_alpha()
-                elif mode == "INDEXED":
-                    image.convert_indexed(
-                        Gimp.ConvertDitherType.NO_DITHER,
-                        Gimp.ConvertPaletteType.GENERATE,
-                        num_colors, False, False, ""
-                    )
-                else:
-                    return {"status": "error", "error": f"Unknown mode: {mode}"}
+                # GIMP refuses to convert an image to the mode it already has.
+                if image.get_base_type() != target:
+                    if target == Gimp.ImageBaseType.RGB:
+                        self._check_ok(image.convert_rgb(), "Converting to RGB")
+                    elif target == Gimp.ImageBaseType.GRAY:
+                        self._check_ok(image.convert_grayscale(), "Converting to grayscale")
+                    else:
+                        self._check_ok(image.convert_indexed(
+                            Gimp.ConvertDitherType.NONE, Gimp.ConvertPaletteType.GENERATE,
+                            num_colors, False, False, ""), "Converting to indexed")
+                if mode in ("RGBA", "GRAYA"):
+                    for layer in image.get_layers():
+                        if not layer.has_alpha():
+                            layer.add_alpha()
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
@@ -4277,11 +4190,20 @@ class MCPPlugin(Gimp.PlugIn):
             image_id = image.get_id()
             saved_to = None
             if save_first:
+                xcf_file = image.get_xcf_file()
                 img_file = image.get_file()
-                if img_file:
-                    saved_to = img_file.get_path().rsplit(".", 1)[0] + ".xcf"
+                if xcf_file and xcf_file.get_path():
+                    saved_to = xcf_file.get_path()  # opened from this XCF, so saving over it is the save
                 else:
-                    saved_to = os.path.join(tempfile.gettempdir(), f"gimp_backup_{image_id}.xcf")
+                    if img_file and img_file.get_path():
+                        stem = os.path.splitext(img_file.get_path())[0]
+                    else:
+                        stem = os.path.join(tempfile.gettempdir(), f"gimp_backup_{image_id}")
+                    # Never overwrite another file, such as a layered photo.xcf next to photo.png.
+                    saved_to, n = stem + ".xcf", 1
+                    while os.path.exists(saved_to):
+                        n += 1
+                        saved_to = f"{stem}-{n}.xcf"
                 pdb  = Gimp.get_pdb()
                 proc = pdb.lookup_procedure("gimp-xcf-save")
                 cfg  = proc.create_config()
