@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-GIMP MCP Plugin - Model Context Protocol integration for GIMP
-Provides bitmap extraction and metadata access functionality
+gimp3-mcp GIMP plugin: runs inside GIMP 3 and carries out the commands the MCP server sends.
+
+Based on gimp-mcp by maorcc and contributors: https://github.com/maorcc/gimp-mcp
 """
 
 import gi
@@ -46,6 +47,7 @@ PAINT_STROKE_KEYS = {
     "points", "tool", "brush", "size", "color", "opacity", "hardness", "angle", "aspect_ratio",
     "spacing", "pressure", "taper_affects", "smooth", "mode", "strength",
 }
+PLUGIN_CREDITS = "tifyr (gimp3-mcp); maorcc, Viesar Lab and contributors (gimp-mcp)"  # shown in GIMP's procedure browser
 IMAGE_NAME_PARASITE = "gimp-mcp-name"  # GIMP images have no settable name; new_canvas stores it here
 IMAGE_DISPLAY_PARASITE = "gimp-mcp-display"  # ids of windows this plugin opened for an image
 # The only color names Gegl.Color.new() parses; every other name silently becomes translucent cyan.
@@ -150,7 +152,7 @@ class MCPPlugin(Gimp.PlugIn):
             procedure.set_documentation(_("Check whether the MCP server is running"),
                                         _("Prints MCP server status to the GIMP console"),
                                         name)
-            procedure.set_attribution("Viesar Lab", "Viesar Lab", "2026")
+            procedure.set_attribution(PLUGIN_CREDITS, PLUGIN_CREDITS, "2026")
             procedure.add_enum_argument("run-mode", _("Run mode"), _("The run mode"),
                                         Gimp.RunMode, Gimp.RunMode.INTERACTIVE,
                                         GObject.ParamFlags.READWRITE)
@@ -163,7 +165,7 @@ class MCPPlugin(Gimp.PlugIn):
             procedure.set_documentation(_("Restart the MCP server socket"),
                                         _("Drops and re-binds the MCP server socket on port 9877"),
                                         name)
-            procedure.set_attribution("Viesar Lab", "Viesar Lab", "2026")
+            procedure.set_attribution(PLUGIN_CREDITS, PLUGIN_CREDITS, "2026")
             procedure.add_enum_argument("run-mode", _("Run mode"), _("The run mode"),
                                         Gimp.RunMode, Gimp.RunMode.INTERACTIVE,
                                         GObject.ParamFlags.READWRITE)
@@ -176,7 +178,7 @@ class MCPPlugin(Gimp.PlugIn):
         procedure.set_documentation(_("Starts an MCP server to control GIMP externally"),
                                     _("Starts an MCP server to control GIMP externally"),
                                     name)
-        procedure.set_attribution("Viesar Lab", "Viesar Lab", "2026")
+        procedure.set_attribution(PLUGIN_CREDITS, PLUGIN_CREDITS, "2026")
         procedure.add_enum_argument("run-mode", _("Run mode"), _("The run mode"),
                                     Gimp.RunMode, Gimp.RunMode.INTERACTIVE,
                                     GObject.ParamFlags.READWRITE)

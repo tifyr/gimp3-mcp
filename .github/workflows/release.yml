@@ -1,0 +1,54 @@
+name: Release
+
+# Push a tag such as v0.2.0 to publish to PyPI and the MCP Registry. The tag, the version in
+# pyproject.toml and both versions in server.json must match.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # PyPI trusted publishing and the MCP Registry's GitHub OIDC login
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Check that the versions match the tag
+        run: |
+          python3 - "${GITHUB_REF_NAME#v}" <<'PY'
+          import json, sys, tomllib
+          tag = sys.argv[1]
+          server = json.load(open("server.json"))
+          versions = {
+              "pyproject.toml": tomllib.load(open("pyproject.toml", "rb"))["project"]["version"],
+              "server.json": server["version"],
+              **{f"server.json package {p['identifier']}": p.get("version") for p in server["packages"]},
+          }
+          wrong = {where: version for where, version in versions.items() if version != tag}
+          if wrong:
+              sys.exit(f"Tag v{tag} does not match: {wrong}")
+          PY
+
+      - name: Build
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Publish to the MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          # The registry checks the new PyPI release, which can take a moment to appear.
+          for attempt in 1 2 3 4 5; do
+            ./mcp-publisher publish && exit 0
+            sleep 30
+          done
+          exit 1

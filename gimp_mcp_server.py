@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# GIMP MCP Server Script — improved fork
-# Adds: new_canvas, check_server, restart_server, no bitmap size restrictions
+# gimp3-mcp MCP server: gives AI clients GIMP 3 tools, carried out by the plugin in gimp-mcp-plugin.py.
+# Based on gimp-mcp by maorcc and contributors: https://github.com/maorcc/gimp-mcp
 
 from mcp.server.fastmcp import FastMCP, Context, Image
 import anyio
@@ -130,7 +130,7 @@ Options with a fixed list of values reject anything not listed, and the error na
 valid values. call_api runs Python inside GIMP for anything the tools do not cover.
 """
 
-mcp = FastMCP("GimpMCP", instructions=INSTRUCTIONS)
+mcp = FastMCP("gimp3-mcp", instructions=INSTRUCTIONS)
 
 # FastMCP calls synchronous tools on its event loop, so one slow GIMP call stalled every
 # other request, pings and cancellations included. Run each tool in a worker thread instead,
