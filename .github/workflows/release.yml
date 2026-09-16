@@ -15,7 +15,8 @@ jobs:
       id-token: write  # PyPI trusted publishing and the MCP Registry's GitHub OIDC login
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv publishes no moving major tag, so pin the release.
+      - uses: astral-sh/setup-uv@v10.1.0
 
       - name: Check that the versions match the tag
         run: |
