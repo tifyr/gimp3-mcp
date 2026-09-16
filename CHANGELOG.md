@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-09-16
 
 First release as gimp3-mcp. It continues [gimp-mcp](https://github.com/maorcc/gimp-mcp) by maorcc and contributors, whose history is kept in this repository.
 
