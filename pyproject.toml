@@ -1,25 +1,53 @@
 [build-system]
-requires = ["setuptools>=77.0.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "gimp-mcp"
-version = "0.1.0"
-description = "GIMP MCP integration for external control of GIMP 3.2"
+name = "gimp3-mcp"
+version = "0.2.0"
+description = "MCP server for GIMP 3: AI assistants paint, edit and export images in a running GIMP"
 readme = "README.md"
-license = "MIT"
+license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [{ name = "tifyr" }]
+keywords = ["mcp", "mcp-server", "model-context-protocol", "gimp", "gimp3", "gimp-plugin", "image-editing", "ai-agents", "claude"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Multimedia :: Graphics :: Editors :: Raster-Based",
+]
 dependencies = [
-    "mcp",
-    "fastmcp",
+    # The server is tested with FastMCP from mcp 1.x; mcp 2 changed its API.
+    "mcp>=1.10.1,<2",
 ]
 
-[project.scripts]
-gimp-mcp-server = "gimp_mcp_server:main"
+[project.urls]
+Homepage = "https://github.com/tifyr/gimp3-mcp"
+Repository = "https://github.com/tifyr/gimp3-mcp"
+Issues = "https://github.com/tifyr/gimp3-mcp/issues"
+Changelog = "https://github.com/tifyr/gimp3-mcp/blob/main/CHANGELOG.md"
+"Original project" = "https://github.com/maorcc/gimp-mcp"
 
-[tool.setuptools]
-py-modules = ["gimp_mcp_server"]
+[project.scripts]
+gimp3-mcp = "gimp3_mcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gimp3_mcp"]
+
+# The server, plugin and prompt docs stay at the repo root so a checkout runs as before; the
+# wheel carries them inside the package, with the docs next to the server that reads them.
+[tool.hatch.build.targets.wheel.force-include]
+"gimp_mcp_server.py" = "gimp3_mcp/server.py"
+"gimp-mcp-plugin.py" = "gimp3_mcp/plugin/gimp-mcp-plugin.py"
+"docs/best_practices.md" = "gimp3_mcp/docs/best_practices.md"
+"docs/iterative_workflow.md" = "gimp3_mcp/docs/iterative_workflow.md"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["docs/demo.mp4", "docs/mcpInAction.gif", "gimp-screenshot1.png", "tests/continuous_edit_test/files"]
 
 [tool.ruff.lint.per-file-ignores]
 "gimp-mcp-plugin.py" = ["E402"]

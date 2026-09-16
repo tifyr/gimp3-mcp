@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tifyr/gimp3-mcp",
+  "title": "GIMP 3 MCP",
+  "description": "Let AI assistants paint, edit and export images in a running GIMP 3, with 80 tools.",
+  "repository": {
+    "url": "https://github.com/tifyr/gimp3-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "gimp3-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,13 +1,18 @@
-# GIMP MCP
+# gimp3-mcp
 
+<!-- mcp-name: io.github.tifyr/gimp3-mcp -->
+
+[![PyPI](https://img.shields.io/pypi/v/gimp3-mcp.svg)](https://pypi.org/project/gimp3-mcp/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Works with Claude Desktop](https://img.shields.io/badge/Works%20with-Claude%20Desktop-7B2CBF.svg)](https://claude.ai/desktop)
 [![GIMP 3.2](https://img.shields.io/badge/GIMP-3.2-orange.svg)](https://gimp.org)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
 
-GIMP MCP lets an AI assistant work in a running GIMP 3.2. You describe what you want; the assistant creates or opens images, paints, edits, and exports them, and looks at the image between steps to check its work.
+gimp3-mcp lets an AI assistant work in a running GIMP 3.2. You describe what you want; the assistant creates or opens images, paints, edits, and exports them, and looks at the image between steps to check its work.
 
 It has two parts: a GIMP plugin that runs inside GIMP, and an [MCP](https://modelcontextprotocol.io) server that your AI client (Claude Desktop, Claude Code, or any other MCP client) starts. Together they give the assistant 80 tools, from brush strokes and color adjustments to layers, text, and batch export.
+
+gimp3-mcp started as a fork of [gimp-mcp](https://github.com/maorcc/gimp-mcp) by maorcc and its contributors, and is now developed separately. See [Credits](#credits) and [How it differs from gimp-mcp](#how-it-differs-from-gimp-mcp).
 
 
 ---
@@ -103,58 +108,28 @@ The client starts the MCP server. The server turns each tool call into a JSON co
 ## Requirements
 
 - **GIMP 3.2** (developed and tested with 3.2.6 on macOS)
-- **Python 3.11 or newer**
-- **[uv](https://docs.astral.sh/uv/)**, for example `pip install uv`
+- **[uv](https://docs.astral.sh/uv/)**, which provides `uvx` and fetches Python 3.11 or newer when needed
 - **An MCP client**, such as Claude Desktop or Claude Code
 
 ---
 
 ## Installation
 
-### 1. Get the code
+### 1. Install the GIMP plugin
+
+Start GIMP once so it creates its settings folder, then run:
 
 ```bash
-git clone https://github.com/maorcc/gimp-mcp.git
-cd gimp-mcp
-uv sync
+uvx gimp3-mcp install-plugin
 ```
 
-### 2. Install the GIMP plugin
+This copies the plugin into `plug-ins/gimp-mcp-plugin/` in the settings folder of the newest GIMP 3.x it finds: `~/Library/Application Support/GIMP/3.2` on macOS, `~/.config/GIMP/3.2` on Linux (Snap and Flatpak included) and `%APPDATA%\GIMP\3.2` on Windows. Pass `--gimp-dir` to choose another folder; GIMP shows the one it uses under **Edit > Preferences > Folders > Plug-ins**. GIMP creates a new settings folder for each minor version, so run the command again after upgrading GIMP. Restart GIMP after installing.
 
-Copy `gimp-mcp-plugin.py` into its own folder inside GIMP's `plug-ins` directory, then restart GIMP.
-
-GIMP keeps its settings in a folder named after its major.minor version (`3.0`, `3.2`, ...) and creates a new one when you upgrade, so the plugin must be reinstalled after a minor upgrade. GIMP shows the active folder under **Edit > Preferences > Folders > Plug-ins**. Start GIMP once before installing so the folder exists.
-
-**macOS and Linux:**
-```bash
-# Pick the base directory for your platform:
-BASE="$HOME/Library/Application Support/GIMP"     # macOS
-# BASE="$HOME/.config/GIMP"                        # Linux
-# BASE="$HOME/snap/gimp/current/.config/GIMP"      # Linux (Snap)
-
-# Use the newest GIMP 3.x settings folder:
-GIMP_DIR="$(ls -d "$BASE"/3.* 2>/dev/null | sort -V | tail -1)"
-if [ -z "$GIMP_DIR" ]; then
-  echo "No GIMP 3.x settings folder under $BASE; start GIMP once, then run this again." >&2
-  exit 1
-fi
-mkdir -p "$GIMP_DIR/plug-ins/gimp-mcp-plugin"
-cp gimp-mcp-plugin.py "$GIMP_DIR/plug-ins/gimp-mcp-plugin/"
-chmod +x "$GIMP_DIR/plug-ins/gimp-mcp-plugin/gimp-mcp-plugin.py"
-echo "Installed into: $GIMP_DIR/plug-ins/gimp-mcp-plugin"
-```
-
-**Windows:** copy the file to
-```text
-%APPDATA%\GIMP\3.2\plug-ins\gimp-mcp-plugin\gimp-mcp-plugin.py
-```
-using your GIMP's major.minor version in place of `3.2`.
-
-### 3. Start the plugin's server in GIMP
+### 2. Start the plugin's server in GIMP
 
 Choose **Tools > MCP > Start MCP Server**. No image needs to be open. The server listens on `localhost:9877` until GIMP quits, so start it again each time you start GIMP. The same menu has **Check MCP Server** and **Restart MCP Server**.
 
-### 4. Connect your AI client
+### 3. Connect your AI client
 
 **Claude Desktop.** Add the server to `claude_desktop_config.json`, which is at `~/Library/Application Support/Claude/` on macOS and `%APPDATA%\Claude\` on Windows:
 
@@ -162,8 +137,8 @@ Choose **Tools > MCP > Start MCP Server**. No image needs to be open. The server
 {
   "mcpServers": {
     "gimp": {
-      "command": "uv",
-      "args": ["run", "--directory", "/full/path/to/gimp-mcp", "gimp_mcp_server.py"]
+      "command": "uvx",
+      "args": ["gimp3-mcp"]
     }
   }
 }
@@ -171,15 +146,15 @@ Choose **Tools > MCP > Start MCP Server**. No image needs to be open. The server
 
 Quit and reopen Claude Desktop. Claude Desktop lets you turn a connector's tools on and off individually. If the assistant says a tool such as `new_canvas` isn't available, enable it in the gimp connector's tool settings and start a new chat.
 
-**Claude Code.** Start Claude Code in the `gimp-mcp` folder and approve the project's MCP server from `.mcp.json`, or add it for all projects:
+**Claude Code.**
 
 ```bash
-claude mcp add --scope user gimp -- uv run --directory /full/path/to/gimp-mcp gimp_mcp_server.py
+claude mcp add --scope user gimp -- uvx gimp3-mcp
 ```
 
-**Other MCP clients.** Configure a stdio server with the command `uv` and the arguments `run --directory /full/path/to/gimp-mcp gimp_mcp_server.py`.
+**Other MCP clients.** Configure a stdio server with the command `uvx` and the argument `gimp3-mcp`.
 
-### 5. Check the connection
+### 4. Check the connection
 
 Ask the assistant to "check the GIMP connection". It calls `check_server`, which reports whether the plugin is reachable and which GIMP version is running.
 
@@ -340,7 +315,7 @@ These scripts talk to the plugin directly, without an AI client. Start the plugi
 |---|---|
 | [`bg_remove.py`](bg_remove.py) | Remove a background with a single fuzzy-select pass |
 | [`bg_remove_iterative.py`](bg_remove_iterative.py) | Remove a background in repeated passes, checking snapshots between them |
-| [`agent_edit_demo.py`](agent_edit_demo.py) | Open, remove the background, warp the mouth into a smile, check snapshots, export |
+| [`agent_edit_demo.py`](agent_edit_demo.py) | Open, remove the background, warp the mouth into a smile, check snapshots, export (the warp step fails while `warp_region` is disabled) |
 
 ---
 
@@ -352,16 +327,16 @@ These scripts talk to the plugin directly, without an AI client. Start the plugi
 
 **The MCP menu is missing in GIMP**
 - Look under **Tools > MCP**.
-- Check that the plugin is in `plug-ins/gimp-mcp-plugin/gimp-mcp-plugin.py` inside the settings folder for your current GIMP version (**Edit > Preferences > Folders > Plug-ins**). Reinstall it after upgrading GIMP from one minor version to the next.
+- Run `uvx gimp3-mcp install-plugin` again and restart GIMP. The plugin belongs in `plug-ins/gimp-mcp-plugin/gimp-mcp-plugin.py` inside the settings folder for your current GIMP version (**Edit > Preferences > Folders > Plug-ins**), and GIMP uses a new folder after each minor upgrade.
 - On macOS and Linux, make sure the file is executable (`chmod +x`), then restart GIMP.
 - Plugin errors appear in GIMP's **Windows > Dockable Dialogs > Error Console**.
 
 **The assistant says a tool doesn't exist**
-- Restart the AI client after updating GIMP MCP.
+- Restart the AI client after updating gimp3-mcp.
 - In Claude Desktop, check that the tool is switched on in the gimp connector's tool settings.
 
 **Changes to the plugin have no effect**
-- GIMP loads the plugin when the server starts. After copying a new `gimp-mcp-plugin.py` into the `plug-ins` folder, restart GIMP and start the server again.
+- GIMP loads the plugin when it starts. After updating gimp3-mcp, run `uvx gimp3-mcp@latest install-plugin`, restart GIMP and start the server again. `uvx` keeps a cached copy, and `@latest` makes it fetch the newest release.
 
 ---
 
@@ -383,16 +358,61 @@ uvx ruff@0.15.11 check .
 The tests talk to a running GIMP, so start the plugin's server first. They create or open their own images, but `run_tests.py` edits whichever image is most recently opened, so save your work before running it.
 
 ```bash
-python run_tests.py                   # 62 checks across the tool categories
+python run_tests.py                   # 85 checks across the tool categories
 python tests/test_paint_stroke.py     # paint_stroke, list_brushes, sample_color
 python tests/test_add_text_metadata.py
 ```
 
-After changing `gimp-mcp-plugin.py`, copy it into GIMP's `plug-ins` folder and restart GIMP. After changing `gimp_mcp_server.py`, restart your AI client.
+`run_tests.py` changes GIMP's foreground and background colors and leaves its test canvas open. `tests/continuous_edit_test/continuous_edit_test.py` closes every open image, so don't run it in a session with work you want to keep.
 
+To run from a checkout instead of PyPI:
+
+```bash
+git clone https://github.com/tifyr/gimp3-mcp.git
+cd gimp3-mcp
+uv sync
+uv run gimp3-mcp install-plugin
+```
+
+Then point your client at the command `uv` with the arguments `run --directory /full/path/to/gimp3-mcp gimp_mcp_server.py`. Claude Code started in the folder offers the same server from `.mcp.json`. After changing `gimp-mcp-plugin.py`, run `uv run gimp3-mcp install-plugin` and restart GIMP. After changing `gimp_mcp_server.py`, restart your AI client.
+
+To release, set the new version in `pyproject.toml` and in both places in `server.json`, describe it in `CHANGELOG.md`, and push a tag such as `v0.2.0`. The Release workflow checks that the versions match, then publishes to PyPI and the MCP Registry.
+
+
+---
+
+## How it differs from gimp-mcp
+
+gimp3-mcp keeps gimp-mcp's design, a GIMP plugin plus an MCP server, and most of its tools. Since the fork it has gained:
+
+- **Painting tools:** `paint_stroke`, `list_brushes` and `sample_color`, for brushwork with GIMP's own brushes.
+- **A fix for GIMP freezing on macOS:** the plugin runs one command at a time.
+- **No silent failures:** tools that reported success without doing anything, such as `auto_levels` and `gradient_fill`, now work, and failed GIMP calls return an error.
+- **No destroyed work:** `resize_canvas` keeps your layers, `close_image` never overwrites another file, tools leave GIMP's colors and your selection as they were, and `warp_region`, which erased layers, is disabled.
+- **A more reliable server:** it no longer loses replies or stalls every request during a slow GIMP call.
+- **Tests that check results:** `run_tests.py` looks at pixels, colors and selections, not only at the status a tool reports.
+- **Installation from PyPI:** `uvx gimp3-mcp`, with a command that installs the plugin.
+
+[CHANGELOG.md](CHANGELOG.md) has the details.
+
+---
+
+## Limitations
+
+- GIMP must be running with its MCP server started (**Tools > MCP > Start MCP Server**); gimp3-mcp can't start GIMP for you.
+- It is developed and tested with GIMP 3.2.6 on macOS. Linux and Windows should work but haven't been tested for this release.
+- `warp_region` is disabled, because GIMP 3.2 gives plugins no working warp operation.
+- The plugin runs one command at a time, so a slow operation holds up the next call.
+- `call_api` runs any Python code inside GIMP. See [Security](#security).
+
+---
+
+## Credits
+
+gimp3-mcp is based on [gimp-mcp](https://github.com/maorcc/gimp-mcp), created by [maorcc](https://github.com/maorcc) with contributions from tomer, jmagdalena, Victor (Viesar Lab), AnthonyHerman and others. The plugin, the server and most of the tools come from their work, and their commits are kept in this repository's history. gimp3-mcp is maintained separately by [tifyr](https://github.com/tifyr) and is not an official release of gimp-mcp.
 
 ---
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+GPL-3.0, the same license as gimp-mcp. See [LICENSE](LICENSE).
