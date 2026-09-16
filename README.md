@@ -123,7 +123,7 @@ Start GIMP once so it creates its settings folder, then run:
 uvx gimp3-mcp install-plugin
 ```
 
-This copies the plugin into `plug-ins/gimp-mcp-plugin/` in the settings folder of the newest GIMP 3.x it finds: `~/Library/Application Support/GIMP/3.2` on macOS, `~/.config/GIMP/3.2` on Linux (Snap and Flatpak included) and `%APPDATA%\GIMP\3.2` on Windows. Pass `--gimp-dir` to choose another folder; GIMP shows the one it uses under **Edit > Preferences > Folders > Plug-ins**. GIMP creates a new settings folder for each minor version, so run the command again after upgrading GIMP. Restart GIMP after installing.
+This copies the plugin into `plug-ins/gimp-mcp-plugin/` inside GIMP's settings folder, and downloads the server so your AI client starts quickly later. It uses the newest GIMP 3.x folder it finds, looking in `~/Library/Application Support/GIMP` on macOS, `%APPDATA%\GIMP` on Windows, and `~/.config/GIMP`, `~/snap/gimp/current/.config/GIMP` and `~/.var/app/org.gimp.GIMP/config/GIMP` on Linux. If your GIMP keeps its settings elsewhere, pass `--gimp-dir`; **Edit > Preferences > Folders > Plug-ins** shows the folder GIMP is using. GIMP creates a new settings folder for each minor version, so run the command again after upgrading GIMP. Restart GIMP after installing.
 
 ### 2. Start the plugin's server in GIMP
 
@@ -283,7 +283,7 @@ The server provides 80 tools. Each tool's own description, which the assistant s
 | `get_context_state` | GIMP's current colors, brush, opacity, and mode |
 | `call_api` | Run Python inside GIMP, for anything the tools don't cover |
 
-The server also offers two MCP prompts, `gimp_best_practices` and `gimp_iterative_workflow`, which clients that support prompts can add to a conversation. They are also in [docs/best_practices.md](docs/best_practices.md) and [docs/iterative_workflow.md](docs/iterative_workflow.md).
+The server also offers two MCP prompts, `gimp_best_practices` and `gimp_iterative_workflow`, which clients that support prompts can add to a conversation. They are also in [docs/best_practices.md](https://github.com/tifyr/gimp3-mcp/blob/main/docs/best_practices.md) and [docs/iterative_workflow.md](https://github.com/tifyr/gimp3-mcp/blob/main/docs/iterative_workflow.md).
 
 ---
 
@@ -313,9 +313,9 @@ These scripts talk to the plugin directly, without an AI client. Start the plugi
 
 | Script | What it does |
 |---|---|
-| [`bg_remove.py`](bg_remove.py) | Remove a background with a single fuzzy-select pass |
-| [`bg_remove_iterative.py`](bg_remove_iterative.py) | Remove a background in repeated passes, checking snapshots between them |
-| [`agent_edit_demo.py`](agent_edit_demo.py) | Open, remove the background, warp the mouth into a smile, check snapshots, export (the warp step fails while `warp_region` is disabled) |
+| [`bg_remove.py`](https://github.com/tifyr/gimp3-mcp/blob/main/bg_remove.py) | Remove a background with a single fuzzy-select pass |
+| [`bg_remove_iterative.py`](https://github.com/tifyr/gimp3-mcp/blob/main/bg_remove_iterative.py) | Remove a background in repeated passes, checking snapshots between them |
+| [`agent_edit_demo.py`](https://github.com/tifyr/gimp3-mcp/blob/main/agent_edit_demo.py) | Open, remove the background, warp the mouth into a smile, check snapshots, export (the warp step fails while `warp_region` is disabled) |
 
 ---
 
@@ -334,6 +334,10 @@ These scripts talk to the plugin directly, without an AI client. Start the plugi
 **The assistant says a tool doesn't exist**
 - Restart the AI client after updating gimp3-mcp.
 - In Claude Desktop, check that the tool is switched on in the gimp connector's tool settings.
+
+**The client can't start the server, or says `uvx` was not found**
+- Apps started from the desktop don't always see your shell's `PATH`. Run `which uvx` in a terminal and put that full path in the config, for example `"command": "/usr/local/bin/uvx"`.
+- The first start downloads the package. If your client gives up waiting, run `uvx gimp3-mcp install-plugin` once in a terminal, which fills the cache, then try again.
 
 **Changes to the plugin have no effect**
 - GIMP loads the plugin when it starts. After updating gimp3-mcp, run `uvx gimp3-mcp@latest install-plugin`, restart GIMP and start the server again. `uvx` keeps a cached copy, and `@latest` makes it fetch the newest release.
@@ -393,7 +397,7 @@ gimp3-mcp keeps gimp-mcp's design, a GIMP plugin plus an MCP server, and most of
 - **Tests that check results:** `run_tests.py` looks at pixels, colors and selections, not only at the status a tool reports.
 - **Installation from PyPI:** `uvx gimp3-mcp`, with a command that installs the plugin.
 
-[CHANGELOG.md](CHANGELOG.md) has the details.
+[CHANGELOG.md](https://github.com/tifyr/gimp3-mcp/blob/main/CHANGELOG.md) has the details.
 
 ---
 
@@ -415,4 +419,4 @@ gimp3-mcp is based on [gimp-mcp](https://github.com/maorcc/gimp-mcp), created by
 
 ## License
 
-GPL-3.0, the same license as gimp-mcp. See [LICENSE](LICENSE).
+GPL-3.0, the same license as gimp-mcp. See [LICENSE](https://github.com/tifyr/gimp3-mcp/blob/main/LICENSE).
