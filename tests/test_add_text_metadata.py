@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression test for issue #15 — add_text must return real layer metadata.
 
-Requires the GIMP MCP plugin running on localhost:9877.
+Requires the GIMP MCP plugin running on localhost:9877 (or on $GIMP_MCP_PORT).
 Exits 0 on pass, 1 on fail.
 """
 import json
@@ -9,7 +9,7 @@ import os
 import socket
 import sys
 
-HOST, PORT = '127.0.0.1', 9877
+HOST, PORT = '127.0.0.1', int(os.environ.get('GIMP_MCP_PORT', 9877))
 HERE       = os.path.dirname(os.path.abspath(__file__))
 TEST_IMAGE = os.path.join(HERE, 'continuous_edit_test', 'files', 'winry_joy.png')
 

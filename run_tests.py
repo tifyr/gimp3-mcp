@@ -7,7 +7,7 @@ import sys
 def cmd(t, params=None):
     s = socket.socket()
     s.settimeout(20)
-    s.connect(('127.0.0.1', 9877))
+    s.connect(('127.0.0.1', int(os.environ.get('GIMP_MCP_PORT', 9877))))
     msg = {'type': t, 'params': params if params is not None else {}}
     s.send(json.dumps(msg).encode() + b'\n')
     r = b''

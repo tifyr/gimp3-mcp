@@ -8,6 +8,7 @@ import functools
 import socket
 import json
 import logging
+import os
 import base64
 import threading
 import traceback
@@ -19,7 +20,23 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("GimpMCPServer")
 
 GIMP_HOST = 'localhost'
-GIMP_PORT = 9877
+GIMP_DEFAULT_PORT = 9877
+
+
+def _port_from_env():
+    """The GIMP to drive: GIMP_MCP_PORT, matching the one that GIMP was started with.
+
+    A bad value stops the server, so a mistyped port never sends tools to another GIMP.
+    """
+    value = os.environ.get("GIMP_MCP_PORT", "").strip()
+    if not value:
+        return GIMP_DEFAULT_PORT
+    if value.isdigit() and 1 <= int(value) <= 65535:
+        return int(value)
+    raise SystemExit(f"GIMP_MCP_PORT must be a port number from 1 to 65535 (got {value!r})")
+
+
+GIMP_PORT = _port_from_env()
 # Connecting should fail fast when GIMP isn't running, but waiting for a response
 # must outlast slow operations: giving up on a call GIMP is still executing makes
 # the agent retry and queue duplicate work behind it.

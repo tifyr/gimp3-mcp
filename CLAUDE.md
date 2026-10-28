@@ -12,7 +12,7 @@ This is gimp3-mcp, a Model Context Protocol integration that drives a running GI
 ## Architecture
 
 The system uses a client-server architecture:
-- GIMP Plugin creates a socket server (localhost:9877) that accepts Python-Fu commands
+- GIMP Plugin creates a socket server (localhost:9877, or the port in `GIMP_MCP_PORT`) that accepts Python-Fu commands
 - MCP Server connects to this socket and exposes a `call_api` tool for MCP clients
 - Commands are executed in GIMP's Python-Fu environment with access to the full GIMP 3.2 API
 
@@ -56,7 +56,7 @@ To run a checkout instead of the released package, use `"command": "uv"` with
 ## Development Commands
 
 - **Lint:** `uvx ruff@0.15.11 check .` (the same ruff version CI uses). `uv sync && uv run pre-commit install` enables a hook that runs `ruff check --fix` on each commit.
-- **Tests:** `python run_tests.py` is an integration suite (85 checks) that talks to a running GIMP on `localhost:9877`, so start the plugin in GIMP first. It cannot run in CI. `tests/test_paint_stroke.py` and `tests/test_add_text_metadata.py` are narrower suites. `run_tests.py` changes GIMP's foreground/background colors and leaves its canvas open, and `tests/continuous_edit_test/continuous_edit_test.py` closes every open image, so don't run it in a session with work worth keeping.
+- **Tests:** `python run_tests.py` is an integration suite (85 checks) that talks to a running GIMP on `localhost:9877` (or `$GIMP_MCP_PORT`, which every test reads), so start the plugin in GIMP first. It cannot run in CI. `tests/test_paint_stroke.py` and `tests/test_add_text_metadata.py` are narrower suites. `run_tests.py` changes GIMP's foreground/background colors and leaves its canvas open, and `tests/continuous_edit_test/continuous_edit_test.py` closes every open image, so don't run it in a session with work worth keeping.
 - **Assert on results, not status:** tools used to return `{"status": "success"}` while doing nothing, so checks compare pixels, colors and selections.
 - **After changing the plugin:** install it again and restart GIMP. The running plug-in process keeps the code it started with, so an edited file has no effect until then.
 
