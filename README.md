@@ -127,7 +127,7 @@ This copies the plugin into `plug-ins/gimp-mcp-plugin/` inside GIMP's settings f
 
 ### 2. Start the plugin's server in GIMP
 
-Choose **Tools > MCP > Start MCP Server**. No image needs to be open. The server listens on `localhost:9877` until GIMP quits, so start it again each time you start GIMP. The same menu has **Check MCP Server** and **Restart MCP Server**.
+Choose **Tools > MCP > Start MCP Server**. No image needs to be open. The server listens on `localhost:9877` (or the port in `GIMP_MCP_PORT`, see *Several GIMPs at once* below) until GIMP quits, so start it again each time you start GIMP. The same menu has **Check MCP Server** and **Restart MCP Server**.
 
 ### 3. Connect your AI client
 
@@ -157,6 +157,17 @@ claude mcp add --scope user gimp -- uvx gimp3-mcp
 ### 4. Check the connection
 
 Ask the assistant to "check the GIMP connection". It calls `check_server`, which reports whether the plugin is reachable and which GIMP version is running.
+
+### Several GIMPs at once
+
+Each GIMP started with `gimp -n` is a separate instance with its own plugin server, so several assistants can work in parallel, each in its own GIMP. Give that GIMP and the MCP server the same port in `GIMP_MCP_PORT`:
+
+```bash
+GIMP_MCP_PORT=9878 gimp -n poster.xcf   # then Tools > MCP > Start MCP Server in that window
+GIMP_MCP_PORT=9878 claude               # this session's gimp tools drive that GIMP
+```
+
+Clients that pass their environment on to the servers they start, such as Claude Code, take the port from the shell. For other clients, set it in the server's config entry, for example `"env": {"GIMP_MCP_PORT": "9878"}` in Claude Desktop. Without `GIMP_MCP_PORT` both sides use 9877. A value that is not a port number stops the MCP server with an error, while the plugin reports it in GIMP's output and keeps 9877.
 
 ---
 
@@ -303,7 +314,7 @@ The assistant receives these rules when it connects. They also help when you rea
 
 ## Security
 
-The plugin runs any Python code it receives through `call_api`. While the server is started, any program on your computer that can connect to `localhost:9877` can control GIMP and run code with your user's permissions. The plugin only accepts connections from your own computer. Start the server when you want to use it, and quit GIMP to stop it.
+The plugin runs any Python code it receives through `call_api`. While the server is started, any program on your computer that can connect to the plugin's port (`localhost:9877` unless `GIMP_MCP_PORT` is set) can control GIMP and run code with your user's permissions. The plugin only accepts connections from your own computer. Start the server when you want to use it, and quit GIMP to stop it.
 
 ---
 

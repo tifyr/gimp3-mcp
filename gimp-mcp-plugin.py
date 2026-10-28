@@ -32,6 +32,7 @@ import contextlib
 LARGE_SCALING_THRESHOLD = 4.0  # Warn if scaling ratio exceeds this value
 MAX_REGION_SIZE = 8192  # Maximum region dimension in pixels
 DEFAULT_TIMEOUT_SECONDS = 30  # Default timeout for operations
+DEFAULT_PORT = 9877  # localhost port the MCP server connects to; GIMP_MCP_PORT overrides it
 LISTEN_BACKLOG = 16  # Pending connections kept while commands run one at a time
 PAINT_MAX_STROKES = 50  # Strokes accepted by one paint_stroke call
 PAINT_MAX_POINTS = 2000  # Points accepted per paint_stroke stroke
@@ -77,6 +78,21 @@ def N_(message): return message
 def _(message): return GLib.dgettext(None, message)
 
 
+def _port_from_env():
+    """The port to listen on: GIMP_MCP_PORT, so several GIMPs started with `gimp -n` can each serve one.
+
+    A bad value falls back to DEFAULT_PORT instead of raising, because an exception
+    here would keep GIMP from registering the plugin's menu entries.
+    """
+    value = os.environ.get("GIMP_MCP_PORT", "").strip()
+    if not value:
+        return DEFAULT_PORT
+    if value.isdigit() and 1 <= int(value) <= 65535:
+        return int(value)
+    print(f"GIMP_MCP_PORT must be a port number from 1 to 65535 (got {value!r}); using {DEFAULT_PORT}")
+    return DEFAULT_PORT
+
+
 class _ThreadStdout:
     """sys.stdout that sends print() output from a thread running call_api code to that call's buffer.
 
@@ -120,10 +136,10 @@ def exec_and_get_results(command, context):
 
 
 class MCPPlugin(Gimp.PlugIn):
-    def __init__(self, host='localhost', port=9877):
+    def __init__(self, host='localhost', port=None):
         super().__init__()
         self.host = host
-        self.port = port
+        self.port = _port_from_env() if port is None else port
         self.running = False
         self.socket = None
         self.server_thread = None
@@ -163,7 +179,7 @@ class MCPPlugin(Gimp.PlugIn):
             procedure = Gimp.Procedure.new(self, name, Gimp.PDBProcType.PLUGIN, self._run_restart, None)
             procedure.set_menu_label(_("Restart MCP Server"))
             procedure.set_documentation(_("Restart the MCP server socket"),
-                                        _("Drops and re-binds the MCP server socket on port 9877"),
+                                        _("Drops and re-binds the MCP server socket on its port (9877 unless GIMP_MCP_PORT is set)"),
                                         name)
             procedure.set_attribution(PLUGIN_CREDITS, PLUGIN_CREDITS, "2026")
             procedure.add_enum_argument("run-mode", _("Run mode"), _("The run mode"),

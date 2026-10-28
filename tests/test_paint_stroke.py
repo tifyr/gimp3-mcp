@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Integration test for paint_stroke, list_brushes and sample_color.
 
-Requires the GIMP MCP plugin running on localhost:9877.
+Requires the GIMP MCP plugin running on localhost:9877 (or on $GIMP_MCP_PORT).
 Exits 0 on pass, 1 on fail.
 """
 import json
+import os
 import socket
 import sys
 
-HOST, PORT = '127.0.0.1', 9877
+HOST, PORT = '127.0.0.1', int(os.environ.get('GIMP_MCP_PORT', 9877))
 WIDTH, HEIGHT = 400, 320
 
 

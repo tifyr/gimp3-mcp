@@ -64,7 +64,7 @@ Usage:
     python tests/continuous_edit_test/continuous_edit_test.py \\
         --character PATH --background PATH --out DIR
 
-Requires the GIMP MCP plugin to be running (GIMP open, server on :9877).
+Requires the GIMP MCP plugin to be running (GIMP open, server on :9877 or $GIMP_MCP_PORT).
 Exits 0 on success, 1 on any transport or GIMP-side failure.
 """
 import argparse
@@ -74,7 +74,7 @@ import os
 import socket
 import sys
 
-HOST, PORT = '127.0.0.1', 9877
+HOST, PORT = '127.0.0.1', int(os.environ.get('GIMP_MCP_PORT', 9877))
 
 
 # ── transport ────────────────────────────────────────────────────────────────

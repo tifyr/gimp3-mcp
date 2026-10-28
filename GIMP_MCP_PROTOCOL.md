@@ -466,7 +466,7 @@ gimp_info = get_gimp_info()
 
 ### Connection Protocol
 - **Host**: localhost (default)
-- **Port**: 9877 (default)
+- **Port**: 9877 (default; `GIMP_MCP_PORT` changes it for both the plugin and the MCP server)
 - **Transport**: TCP socket
 - **Format**: JSON messages
 - **Auto-disconnect**: Configurable (default: true)
