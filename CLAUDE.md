@@ -70,7 +70,7 @@ To run a checkout instead of the released package, use `"command": "uv"` with
 ### Packaging & release
 
 - `pyproject.toml` uses hatchling. `[tool.hatch.build.targets.wheel.force-include]` maps the root `gimp_mcp_server.py`, `gimp-mcp-plugin.py` and the two `docs/*.md` prompt files into the `gimp3_mcp` package, so the files stay at the repo root while the wheel ships them inside the package. The prompt docs must land next to `server.py`, which reads them relative to `__file__`.
-- `mcp` is capped below 2, whose FastMCP API differs. Tested against 1.10.1 and 1.30.0.
+- `mcp` 1 and 2 both work: mcp 2 renamed FastMCP to MCPServer, and the server imports `MCPServer` with a fallback to mcp 1's `FastMCP`. mcp 2 passes only a `ToolError`'s message to the client, so the worker-thread wrapper turns other exceptions into `ToolError`. Tested against 1.10.1 (which needs pydantic < 2.12), 1.30.0, 2.0.0 and 2.3.0.
 - To release: put the same version in `pyproject.toml` and both places in `server.json`, date the `CHANGELOG.md` entry, then push a `vX.Y.Z` tag. `.github/workflows/release.yml` checks that the versions agree, publishes to PyPI through trusted publishing (environment `pypi`) and registers the server with `mcp-publisher`.
 - Registry ownership rests on the `<!-- mcp-name: io.github.tifyr/gimp3-mcp -->` marker in `README.md`; keep it.
 - `astral-sh/setup-uv` publishes no moving major tag, so its `uses:` reference must name an exact release.

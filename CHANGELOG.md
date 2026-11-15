@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The server runs on mcp 2 as well as mcp 1 (`mcp>=1.10.1,<3`). On mcp 2, tool errors still reach the client with their cause, such as GIMP not running.
+
 ## 0.2.0 — 2026-09-16
 
 First release as gimp3-mcp. It continues [gimp-mcp](https://github.com/maorcc/gimp-mcp) by maorcc and contributors, whose history is kept in this repository.

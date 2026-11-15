@@ -21,8 +21,8 @@ classifiers = [
     "Topic :: Multimedia :: Graphics :: Editors :: Raster-Based",
 ]
 dependencies = [
-    # The server is tested with FastMCP from mcp 1.x; mcp 2 changed its API.
-    "mcp>=1.10.1,<2",
+    # mcp 2 renamed FastMCP to MCPServer; the server imports either.
+    "mcp>=1.10.1,<3",
 ]
 
 [project.urls]

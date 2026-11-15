@@ -2,7 +2,12 @@
 # gimp3-mcp MCP server: gives AI clients GIMP 3 tools, carried out by the plugin in gimp-mcp-plugin.py.
 # Based on gimp-mcp by maorcc and contributors: https://github.com/maorcc/gimp-mcp
 
-from mcp.server.fastmcp import FastMCP, Context, Image
+try:
+    from mcp.server.mcpserver import MCPServer, Context, Image
+    from mcp.server.mcpserver.exceptions import ToolError
+except ModuleNotFoundError:  # mcp 1.x, where MCPServer is called FastMCP
+    from mcp.server.fastmcp import FastMCP as MCPServer, Context, Image
+    from mcp.server.fastmcp.exceptions import ToolError
 import anyio
 import functools
 import socket
@@ -130,9 +135,9 @@ Options with a fixed list of values reject anything not listed, and the error na
 valid values. call_api runs Python inside GIMP for anything the tools do not cover.
 """
 
-mcp = FastMCP("gimp3-mcp", instructions=INSTRUCTIONS)
+mcp = MCPServer("gimp3-mcp", instructions=INSTRUCTIONS)
 
-# FastMCP calls synchronous tools on its event loop, so one slow GIMP call stalled every
+# MCPServer calls synchronous tools on its event loop, so one slow GIMP call stalled every
 # other request, pings and cancellations included. Run each tool in a worker thread instead,
 # one at a time and in arrival order: GIMP runs commands serially, and tools depend on the
 # order they were sent in (image_index 0, the active layer).
@@ -147,7 +152,15 @@ def _tool_in_worker_thread(*args, **kwargs):
         @functools.wraps(fn)
         async def run(*fn_args, **fn_kwargs):
             async with _tool_order_lock:
-                return await anyio.to_thread.run_sync(functools.partial(fn, *fn_args, **fn_kwargs))
+                try:
+                    return await anyio.to_thread.run_sync(functools.partial(fn, *fn_args, **fn_kwargs))
+                except ToolError:
+                    raise
+                except Exception as e:
+                    # mcp 2 passes only a ToolError's message to the client; the tools' error
+                    # messages (GIMP not running, invalid values) are meant for it.
+                    logger.debug("Tool %s failed", fn.__name__, exc_info=True)
+                    raise ToolError(str(e)) from e
         return register(run)
     return decorator
 
@@ -2132,7 +2145,7 @@ def _painting_error(result):
 
 
 # No return annotation: the result is a dict, or [dict, Image] with preview=True,
-# and an annotation would make FastMCP validate it as structured output.
+# and an annotation would make MCPServer validate it as structured output.
 @mcp.tool()
 def paint_stroke(
     ctx: Context,
